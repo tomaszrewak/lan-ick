@@ -109,3 +109,31 @@ def encode_with_sae(hidden_state: torch.Tensor, layer: int, width: str = "16k") 
     if hidden_state.dim() == 3:
         hidden_state = hidden_state.squeeze(0)
     return sae.encode(hidden_state.float())
+
+
+def extract_text_features(text: str, layers: list[int], width: str = "16k") -> dict:
+    """Extract SAE features for a text across specified layers.
+
+    Returns:
+        {layer: {feat_id: [(position, activation, token_str)]}}
+    """
+    inputs, str_tokens = tokenize(text)
+    hidden_states = get_hidden_states(inputs)
+
+    features = {}
+    for layer in layers:
+        sae_acts = encode_with_sae(hidden_states[layer + 1], layer, width)
+        layer_feats: dict[int, list[tuple[int, float, str]]] = {}
+        nonzero = sae_acts.nonzero()
+        for pos, feat_idx in nonzero:
+            fid = feat_idx.item()
+            if fid not in layer_feats:
+                layer_feats[fid] = []
+            layer_feats[fid].append((
+                pos.item(),
+                sae_acts[pos, feat_idx].item(),
+                str_tokens[pos.item()],
+            ))
+        features[layer] = layer_feats
+
+    return {"tokens": str_tokens, "features": features}

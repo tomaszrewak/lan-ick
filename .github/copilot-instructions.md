@@ -51,8 +51,6 @@ Every experiment MUST follow this protocol:
 
 ## Data Caching
 
-## Data Caching
-
 All temporary/generated files go in `temp/` — never in the project root. The `temp/` folder is gitignored. Deleting it should have no effect other than requiring regeneration on next run.
 
 Caching uses `src/cache.py` with the interface:
@@ -61,7 +59,7 @@ Caching uses `src/cache.py` with the interface:
 result = cached(name, version, generator_fn)
 ```
 
-- `name`: Human-readable artifact name (e.g., `"test_pairs"`, `"pair_comparisons"`).
+- `name`: Human-readable artifact name (e.g., `"test_pairs"`, `"pair_features"`).
 - `version`: String that determines cache validity. When it changes, the old cache is ignored and `generator_fn` re-runs.
 - `generator_fn`: Zero-arg callable that produces the data.
 
@@ -74,20 +72,20 @@ There are two reasons to invalidate cache:
 1. **Logic changes** (the generator function was modified): bump a manual version string, e.g., `"v1"` → `"v2"`.
 2. **Parameter changes** (different layers, width, dataset): encode the parameters in the version string so it auto-invalidates.
 
-For example, comparison results depend on both logic and parameters:
+For example, feature extraction results depend on both logic and parameters:
 
 ```python
-COMPARE_VERSION = "v1"  # bump when compare_pair logic changes
-COMPARE_CACHE_KEY = f"{COMPARE_VERSION}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
-comparisons = cached("pair_comparisons", COMPARE_CACHE_KEY, compute_all_comparisons)
+EXTRACT_VERSION = "v1"  # bump when extract_text_features logic changes
+EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
+all_features = cached("pair_features", EXTRACT_CACHE_KEY, extract_all)
 ```
 
-Changing `LAYERS` or `WIDTH` produces a different cache key automatically. Changing the comparison logic requires bumping `COMPARE_VERSION`.
+Changing `LAYERS` or `WIDTH` produces a different cache key automatically. Changing the extraction logic requires bumping `EXTRACT_VERSION`.
 
 ### What to cache vs. not
 
-- **Cache**: Anything that runs text through the LLM/SAE (expensive, minutes).
-- **Don't cache**: Analysis and aggregation over cached results (cheap, seconds). This is the part we iterate on frequently.
+- **Cache**: Anything that runs text through the LLM/SAE (expensive, minutes). This includes per-text feature extraction.
+- **Don't cache**: Training (finding important features), evaluation (confusion matrix), and any analysis over cached features. These are cheap (seconds) and are the part we iterate on frequently.
 
 ## Classifier Design
 

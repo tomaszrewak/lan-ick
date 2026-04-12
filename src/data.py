@@ -1,5 +1,6 @@
 """Synthetic data generation for error detection experiments."""
 
+import random
 from dataclasses import dataclass
 
 
@@ -49,3 +50,17 @@ def generate_test_pairs() -> list[TextPair]:
             error="Scientits discoverd an intresting patern in the data.",
         ),
     ]
+
+
+def split_train_test(
+    pairs: list[TextPair], train_ratio: float = 0.75, seed: int = 42
+) -> tuple[list[int], list[int]]:
+    """Split pair indices into train/test sets.
+
+    Returns (train_indices, test_indices) — sorted for reproducibility.
+    """
+    indices = list(range(len(pairs)))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+    split = int(len(pairs) * train_ratio)
+    return sorted(indices[:split]), sorted(indices[split:])

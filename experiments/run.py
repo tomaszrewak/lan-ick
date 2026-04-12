@@ -1,196 +1,101 @@
 """Experiment: Baseline error-only feature detection with Gemma 3 1B + GemmaScope 2.
 
-Replicates our earlier Gemma 2 harness results on the newer model/SAE stack.
-Reads top-to-bottom: data → model → per-pair analysis → cross-pair summary.
+Flow: load data → split train/test → extract features (cached) → train → evaluate.
 """
 
 import json
-from collections import Counter
 from pathlib import Path
 
 from src.cache import cached, TEMP_DIR
-from src.data import generate_test_pairs, TextPair
-from src.model import tokenize, get_hidden_states, encode_with_sae
+from src.data import generate_test_pairs, split_train_test
+from src.model import extract_text_features
+from src.classifier import train, evaluate
 
 # --------------- Experiment parameters ---------------
 
 LAYERS = [5, 10, 13, 17, 22]
 WIDTH = "16k"
+TRAIN_RATIO = 0.75
+SPLIT_SEED = 42
+MIN_PAIR_RATIO = 0.5  # fraction of training pairs a feature must be error-only in
+
 DATA_VERSION = "v1"           # bump when generate_test_pairs changes
-COMPARE_VERSION = "v1"        # bump when compare_pair logic changes
-MIN_PAIRS_FOR_CONSISTENCY = 4  # feature must be error-only in this many pairs
+EXTRACT_VERSION = "v1"        # bump when extract_text_features logic changes
 
 RESULTS_DIR = TEMP_DIR / "results"
 
-# Cache key for comparisons encodes the model parameters so changing
-# LAYERS or WIDTH auto-invalidates without a manual version bump.
-COMPARE_CACHE_KEY = f"{COMPARE_VERSION}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
-
-
-# --------------- Per-pair comparison ---------------
-
-def compare_pair(pair: TextPair, layers: list[int], width: str) -> dict:
-    """Compare SAE activations between clean and error text across layers."""
-
-    def get_features(text, layers, width):
-        inputs, str_tokens = tokenize(text)
-        hidden_states = get_hidden_states(inputs)
-        by_layer = {}
-        for layer in layers:
-            sae_acts = encode_with_sae(hidden_states[layer + 1], layer, width)
-            features = {}
-            nonzero = sae_acts.nonzero()
-            for pos, feat_idx in nonzero:
-                fid = feat_idx.item()
-                if fid not in features:
-                    features[fid] = {}
-                features[fid][pos.item()] = (sae_acts[pos, feat_idx].item(), str_tokens[pos.item()])
-            by_layer[layer] = (features, str_tokens)
-        return by_layer
-
-    clean_by_layer = get_features(pair.clean, layers, width)
-    error_by_layer = get_features(pair.error, layers, width)
-
-    comparison = {}
-    for layer in layers:
-        clean_feats, clean_tokens = clean_by_layer[layer]
-        error_feats, error_tokens = error_by_layer[layer]
-
-        only_in_error = set(error_feats.keys()) - set(clean_feats.keys())
-        only_in_clean = set(clean_feats.keys()) - set(error_feats.keys())
-        in_both = set(clean_feats.keys()) & set(error_feats.keys())
-
-        comparison[layer] = {
-            "clean_tokens": clean_tokens,
-            "error_tokens": error_tokens,
-            "clean_feature_count": len(clean_feats),
-            "error_feature_count": len(error_feats),
-            "only_in_error": len(only_in_error),
-            "only_in_clean": len(only_in_clean),
-            "in_both": len(in_both),
-            "only_in_error_ids": sorted(only_in_error),
-            "error_only_detail": {
-                feat_id: {
-                    pos: {"activation": act, "token": tok}
-                    for pos, (act, tok) in error_feats[feat_id].items()
-                }
-                for feat_id in only_in_error
-            },
-        }
-
-    return comparison
-
-
-# --------------- Cross-pair analysis ---------------
-
-def cross_pair_analysis(all_results: list[dict], layers: list[int], min_pairs: int):
-    """Find features consistently error-only across pairs."""
-    summary = {}
-    for layer in layers:
-        error_only_counter = Counter()
-        error_only_positions = {}
-
-        for i, res in enumerate(all_results):
-            c = res["comparison"][layer]
-            for feat_id in c["only_in_error_ids"]:
-                error_only_counter[feat_id] += 1
-                if feat_id not in error_only_positions:
-                    error_only_positions[feat_id] = []
-                for pos, info in c["error_only_detail"].get(feat_id, {}).items():
-                    error_only_positions[feat_id].append({
-                        "pair": i, "pos": pos,
-                        "token": info["token"], "activation": info["activation"],
-                    })
-
-        consistent = {f: cnt for f, cnt in error_only_counter.items() if cnt >= min_pairs}
-        summary[layer] = {
-            "total_consistent": len(consistent),
-            "features": sorted(
-                [
-                    {
-                        "feature_id": fid,
-                        "pair_count": cnt,
-                        "avg_activation": sum(p["activation"] for p in error_only_positions[fid])
-                                         / len(error_only_positions[fid]),
-                        "sample_tokens": [
-                            f"{p['token']}({p['activation']:.1f})"
-                            for p in error_only_positions[fid][:5]
-                        ],
-                    }
-                    for fid, cnt in consistent.items()
-                ],
-                key=lambda x: -x["pair_count"],
-            ),
-        }
-
-    return summary
+# Cache key for feature extraction encodes model parameters so
+# changing LAYERS or WIDTH auto-invalidates.
+EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
 
 
 # --------------- Main ---------------
 
 def main():
-    # 1. Load test data (cached)
-    test_pairs = cached("test_pairs", DATA_VERSION, generate_test_pairs)
-    print(f"Loaded {len(test_pairs)} test pairs")
+    # 1. Load all pairs
+    all_pairs = cached("test_pairs", DATA_VERSION, generate_test_pairs)
+    print(f"Loaded {len(all_pairs)} pairs")
 
-    # 2. Run per-pair comparisons (cached — this is the expensive LLM part)
-    def compute_all_comparisons():
+    # 2. Split train/test (deterministic, instant)
+    train_idx, test_idx = split_train_test(all_pairs, TRAIN_RATIO, SPLIT_SEED)
+    print(f"Split: {len(train_idx)} train, {len(test_idx)} test "
+          f"(train={train_idx}, test={test_idx})")
+
+    # 3. Extract features for ALL pairs (cached — expensive LLM + SAE part)
+    def extract_all():
         results = []
-        for i, pair in enumerate(test_pairs):
-            print(f"  [{i+1}/{len(test_pairs)}] Processing: {pair.error[:50]}...")
-            comparison = compare_pair(pair, LAYERS, WIDTH)
-            results.append({
-                "pair_index": i,
-                "clean": pair.clean,
-                "error": pair.error,
-                "comparison": comparison,
-            })
+        for i, pair in enumerate(all_pairs):
+            print(f"  [{i+1}/{len(all_pairs)}] {pair.error[:50]}...")
+            clean_feats = extract_text_features(pair.clean, LAYERS, WIDTH)
+            error_feats = extract_text_features(pair.error, LAYERS, WIDTH)
+            results.append({"clean": clean_feats, "error": error_feats})
         return results
 
-    all_results = cached("pair_comparisons", COMPARE_CACHE_KEY, compute_all_comparisons)
+    all_features = cached("pair_features", EXTRACT_CACHE_KEY, extract_all)
 
-    # Print per-pair summary (always, even from cache)
-    for res in all_results:
-        print(f"\nPair {res['pair_index']+1}: {res['clean'][:50]}...")
-        for layer in LAYERS:
-            c = res["comparison"][layer]
-            print(f"  Layer {layer}: clean={c['clean_feature_count']} feats, "
-                  f"error={c['error_feature_count']} feats, "
-                  f"error_only={c['only_in_error']}")
+    train_features = [all_features[i] for i in train_idx]
+    test_features = [all_features[i] for i in test_idx]
 
-    # 3. Cross-pair analysis (always re-runs — this is cheap and what we iterate on)
-    print(f"\n{'='*60}")
-    print("CROSS-PAIR ANALYSIS")
-    print(f"{'='*60}")
-
-    summary = cross_pair_analysis(all_results, LAYERS, MIN_PAIRS_FOR_CONSISTENCY)
-
+    # 4. Train: find error-indicative features
+    classifier = train(train_features, LAYERS, min_pair_ratio=MIN_PAIR_RATIO)
+    print(f"\n{classifier.summary()}")
     for layer in LAYERS:
-        s = summary[layer]
-        print(f"\nLayer {layer}: {s['total_consistent']} features error-only "
-              f"in {MIN_PAIRS_FOR_CONSISTENCY}+ pairs")
-        for feat in s["features"][:10]:
-            print(f"  Feature {feat['feature_id']}: {feat['pair_count']}/{len(test_pairs)} pairs, "
-                  f"avg_act={feat['avg_activation']:.1f}, "
-                  f"tokens: {', '.join(feat['sample_tokens'])}")
+        fids = sorted(classifier.error_features.get(layer, set()))
+        print(f"  Layer {layer}: {len(fids)} error features"
+              + (f" (top: {fids[:5]}...)" if len(fids) > 5 else f" {fids}"))
 
-    # 4. Save results
+    # 5. Evaluate on held-out test pairs
+    metrics = evaluate(test_features, classifier)
+    print(f"\n{'='*60}")
+    print("TEST SET EVALUATION")
+    print(f"{'='*60}")
+    print(metrics.confusion_str())
+    print()
+    print(metrics.summary())
+
+    # 6. Save results
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = RESULTS_DIR / "baseline_experiment.json"
 
-    def make_serializable(obj):
-        if isinstance(obj, dict):
-            return {str(k): make_serializable(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [make_serializable(x) for x in obj]
-        if isinstance(obj, set):
-            return sorted(obj)
-        if isinstance(obj, float):
-            return round(obj, 4)
-        return obj
-
+    results = {
+        "params": {
+            "layers": LAYERS, "width": WIDTH,
+            "train_ratio": TRAIN_RATIO, "split_seed": SPLIT_SEED,
+            "min_pair_ratio": MIN_PAIR_RATIO,
+            "n_train": len(train_idx), "n_test": len(test_idx),
+            "train_indices": train_idx, "test_indices": test_idx,
+        },
+        "classifier": {
+            "total_features": classifier.total_features,
+            "per_layer": {
+                layer: sorted(classifier.error_features.get(layer, set()))
+                for layer in LAYERS
+            },
+        },
+        "metrics": metrics.to_dict(),
+    }
     with open(output_path, "w") as f:
-        json.dump(make_serializable({"results": all_results, "summary": summary}), f, indent=2)
+        json.dump(results, f, indent=2)
     print(f"\nResults saved to {output_path}")
 
 
