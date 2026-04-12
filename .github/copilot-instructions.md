@@ -14,6 +14,7 @@ src/
 experiments/
   run.py             # Single entry point for the current experiment
   log.md             # Experiment log (append-only, never delete entries)
+  ideas.md           # Future experiment ideas (keep up to date)
 temp/                # All generated/cached artifacts (gitignored, fully disposable)
   data/              # Synthetic datasets (keyed by generation params)
   results/           # Experiment outputs (JSON, plots, etc.)
@@ -40,7 +41,9 @@ Every experiment MUST follow this protocol:
    - Conclusions and observations
    - Git commit hash (added after committing)
 
-5. **Commit**: Stage and commit all source changes. The commit message should reference the experiment title. After committing, go back and add the commit hash to the log entry, then amend the commit.
+5. **Update ideas**: Review `experiments/ideas.md` — add new ideas that emerged, adjust priorities based on findings, remove ideas that were completed or became irrelevant.
+
+6. **Commit**: Stage and commit all source changes. The commit message should reference the experiment title. After committing, go back and add the commit hash to the log entry, then amend the commit.
 
 ### Experiment Code Style
 
