@@ -1,13 +1,13 @@
-"""Experiment: Baseline error-only feature detection with Gemma 3 1B + GemmaScope 2.
+"""Experiment 1: Scaled synthetic data with character-level errors.
 
-Flow: load data → split train/test → extract features (cached) → train → evaluate.
+Flow: generate synthetic pairs → split train/test → extract features (cached) → train → evaluate.
 """
 
 import json
 from pathlib import Path
 
 from src.cache import cached, TEMP_DIR
-from src.data import generate_test_pairs, split_train_test
+from src.data import generate_synthetic_pairs, split_train_test
 from src.model import extract_text_features
 from src.classifier import train, evaluate
 
@@ -19,27 +19,34 @@ TRAIN_RATIO = 0.75
 SPLIT_SEED = 42
 MIN_PAIR_RATIO = 0.5  # fraction of training pairs a feature must be error-only in
 
-DATA_VERSION = "v1"           # bump when generate_test_pairs changes
+N_PAIRS = 300
+MIN_WORDS = 8
+MAX_WORDS = 20
+DATA_SEED = 42
+
+DATA_VERSION = "v2"           # bump when data generation changes
 EXTRACT_VERSION = "v1"        # bump when extract_text_features logic changes
 
 RESULTS_DIR = TEMP_DIR / "results"
 
 # Cache key for feature extraction encodes model parameters so
 # changing LAYERS or WIDTH auto-invalidates.
-EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
+EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
 
 
 # --------------- Main ---------------
 
 def main():
-    # 1. Load all pairs
-    all_pairs = cached("test_pairs", DATA_VERSION, generate_test_pairs)
+    # 1. Generate synthetic pairs
+    all_pairs = cached(
+        "synthetic_pairs", DATA_VERSION,
+        lambda: generate_synthetic_pairs(N_PAIRS, MIN_WORDS, MAX_WORDS, DATA_SEED),
+    )
     print(f"Loaded {len(all_pairs)} pairs")
 
     # 2. Split train/test (deterministic, instant)
     train_idx, test_idx = split_train_test(all_pairs, TRAIN_RATIO, SPLIT_SEED)
-    print(f"Split: {len(train_idx)} train, {len(test_idx)} test "
-          f"(train={train_idx}, test={test_idx})")
+    print(f"Split: {len(train_idx)} train, {len(test_idx)} test")
 
     # 3. Extract features for ALL pairs (cached — expensive LLM + SAE part)
     def extract_all():
@@ -75,11 +82,13 @@ def main():
 
     # 6. Save results
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = RESULTS_DIR / "baseline_experiment.json"
+    output_path = RESULTS_DIR / "experiment_1_synthetic.json"
 
     results = {
         "params": {
             "layers": LAYERS, "width": WIDTH,
+            "n_pairs": N_PAIRS, "min_words": MIN_WORDS, "max_words": MAX_WORDS,
+            "data_seed": DATA_SEED,
             "train_ratio": TRAIN_RATIO, "split_seed": SPLIT_SEED,
             "min_pair_ratio": MIN_PAIR_RATIO,
             "n_train": len(train_idx), "n_test": len(test_idx),

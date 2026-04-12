@@ -4,9 +4,20 @@ Future experiment proposals, ordered roughly by priority/importance. Update this
 
 ---
 
-### Scale up synthetic data (100s–1000s of pairs)
-**Goal:** Validate that error-only features generalize beyond 8 hand-crafted pairs. Reduce risk that current findings are artifacts of small sample size.
-**Importance:** High — our current 8-pair results are suggestive but not statistically robust. This is the foundation for everything else.
+### ~~Scale up synthetic data (100s–1000s of pairs)~~ ✓ Done (Experiment 1)
+Completed: 300 pairs, F1=70.1%. Features dropped from 204→41 (more selective). Bottleneck is now threshold/classifier.
+
+### Tune min_active_features threshold
+**Goal:** Sweep `min_active_features` from 1 to 20+ and plot precision/recall tradeoff. With 41 error features and threshold=1, FP rate is 85%. A higher threshold should dramatically improve precision while keeping recall high.
+**Importance:** Very high — likely the single biggest win available right now.
+
+### Use activation magnitude, not just binary presence
+**Goal:** Instead of just checking whether an error feature fires (binary), use the activation strength. A logistic regression or simple weighted sum over feature activations could separate errors from clean much better than counting features.
+**Importance:** High — more principled than a hard threshold.
+
+### Word order swap and similar-word replacement errors
+**Goal:** Add non-character-level error types: word order swaps ("the went she to store") and similar-word substitution ("their" → "there", "affect" → "effect"). Test whether SAE features detect semantic/syntactic errors, not just character-level.
+**Importance:** High — current errors are all character-level, limiting generalizability.
 
 ### Compare 16k vs 65k vs 262k SAE widths
 **Goal:** Determine if wider SAEs produce sharper, more specific error-detection features. The 16k SAE may lump multiple error types into one feature; wider SAEs might separate them.
