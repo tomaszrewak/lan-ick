@@ -1,0 +1,15 @@
+[project]
+name = "lan-ick"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.13.0",
+    "einops>=0.8.2",
+    "huggingface-hub>=1.10.1",
+    "sae-lens>=6.39.0",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "transformers>=5.5.3",
+]
