@@ -33,7 +33,7 @@ Every experiment MUST follow this protocol:
 
 2. **Implement**: Modify `experiments/run.py`, `src/` modules, or any other code as needed. Previous experiment code is NOT sacred — each experiment is preserved as a git commit, so destructive changes to both the experiment runner and source modules are welcomed. Override, rewrite, or delete freely.
 
-3. **Run**: Execute via `experiments/run.py`. All cached data lives in `temp/` and is keyed so that parameter changes auto-regenerate stale data.
+3. **Run**: Execute via `uv run python3 -m experiments.run`. All cached data lives in `temp/` and is keyed so that parameter changes auto-regenerate stale data.
 
 4. **Post-experiment**: Update the log entry with:
    - Results summary (quantitative)
@@ -42,11 +42,49 @@ Every experiment MUST follow this protocol:
 
 5. **Commit**: Stage and commit all source changes. The commit message should reference the experiment title. After committing, go back and add the commit hash to the log entry, then amend the commit.
 
+### Experiment Code Style
+
+`experiments/run.py` should read **top-to-bottom** like a script: load data → set up model → run analysis → print/save results. It should compose building blocks from `src/` rather than implementing low-level logic. Keep it easy to scan and understand at a glance — someone reading the experiment should see the "what" without getting lost in the "how".
+
 ## Data Caching
 
-- All temporary/generated files go in `temp/` — never in the project root.
-- Cache keys should be deterministic hashes of the generation parameters (e.g., dataset config, model name, SAE width). When parameters change, stale cache is ignored and regenerated.
-- The `temp/` folder is gitignored. Deleting it should have no effect other than requiring regeneration on next run.
+## Data Caching
+
+All temporary/generated files go in `temp/` — never in the project root. The `temp/` folder is gitignored. Deleting it should have no effect other than requiring regeneration on next run.
+
+Caching uses `src/cache.py` with the interface:
+
+```python
+result = cached(name, version, generator_fn)
+```
+
+- `name`: Human-readable artifact name (e.g., `"test_pairs"`, `"pair_comparisons"`).
+- `version`: String that determines cache validity. When it changes, the old cache is ignored and `generator_fn` re-runs.
+- `generator_fn`: Zero-arg callable that produces the data.
+
+Files are stored as `temp/data/{name}__{version}.pkl`.
+
+### Versioning strategy
+
+There are two reasons to invalidate cache:
+
+1. **Logic changes** (the generator function was modified): bump a manual version string, e.g., `"v1"` → `"v2"`.
+2. **Parameter changes** (different layers, width, dataset): encode the parameters in the version string so it auto-invalidates.
+
+For example, comparison results depend on both logic and parameters:
+
+```python
+COMPARE_VERSION = "v1"  # bump when compare_pair logic changes
+COMPARE_CACHE_KEY = f"{COMPARE_VERSION}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
+comparisons = cached("pair_comparisons", COMPARE_CACHE_KEY, compute_all_comparisons)
+```
+
+Changing `LAYERS` or `WIDTH` produces a different cache key automatically. Changing the comparison logic requires bumping `COMPARE_VERSION`.
+
+### What to cache vs. not
+
+- **Cache**: Anything that runs text through the LLM/SAE (expensive, minutes).
+- **Don't cache**: Analysis and aggregation over cached results (cheap, seconds). This is the part we iterate on frequently.
 
 ## Classifier Design
 
@@ -73,7 +111,7 @@ The long-term goal is to bake the pipeline (LLM truncated at the relevant layer 
 
 ## Conventions
 
-- Entry point for experiments: `uv run python3 experiments/run.py`
+- Run experiments: `uv run python3 -m experiments.run`
 - Use `torch.no_grad()` for all inference — we never train
 - Use bfloat16 for the LLM, float32 for SAE encoding
 - Keep experiment scripts deterministic where possible (fixed seeds for any randomness)
