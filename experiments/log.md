@@ -675,3 +675,151 @@ RF at global thresholds collapses rapidly: t=0.5 F1=74.8%, t=0.8 F1=50.7%, t=0.9
 - Next: try negative features (clean-only activations as counterweight) — this addresses the asymmetry in feature space, which is orthogonal to classifier choice.
 
 **Commit:** 2a12042
+
+---
+
+## Experiment 15: Negative-example features (clean-only activation counterweight)
+
+**Date:** 2025-07-25T14:00:00+02:00
+
+**Goal:** Add "correctness evidence" to the classifier by selecting features that fire at last-word positions in clean text but NOT at error word last-token positions. These negative features provide a counterweight — high activation pushes P(error) down, making the decision boundary more robust. Test whether concatenating positive + negative feature vectors reduces false positives while maintaining detection rate.
+
+**Hypothesis:** Current feature selection has survivorship bias — only "error evidence" features are selected. There should be SAE features encoding "this word looks grammatically normal" that fire on clean text but not at error positions. Adding N_neg negative features (top-N by pair count, mirroring the positive selection) will give the LR classifier both dimensions to work with, reducing FP by providing evidence that a token is correct. We expect FP to drop meaningfully with little or no loss in recall.
+
+**Parameters:**
+- Baseline: position-aware top-50 positive features, per-type thresholds (FP ≤ 5%)
+- Negative feature selection: mirror of positive — features at clean last-word positions, absent from error word last-token positions
+- Sweep: N_neg ∈ [0, 25, 50] (0 = baseline)
+- Layers: [7, 13, 17, 22], SAE width: 16k
+- 600 pairs, v5 data, 75/25 split, seed=42
+- Classifier: OVR binary LR, class_weight="balanced", max_iter=2000
+
+**Results:**
+
+Per-type thresholds (FP ≤ 5%) comparison:
+
+| N_neg | F1    | Precision | Recall | FP# |
+|-------|-------|-----------|--------|-----|
+| 0     | **81.6%** | 83.3% | **80.0%** | 24  |
+| 25    | 69.3% | 83.2% | 59.3% | 18  |
+| 50    | 60.3% | 85.4% | 46.7% | **12** |
+
+Per-type breakdown (FP ≤ 5%):
+
+| Type         | N=0 Thresh | N=0 Det | N=25 Thresh | N=25 Det | N=50 Thresh | N=50 Det |
+|--------------|------------|---------|-------------|----------|-------------|----------|
+| spelling     | 0.93       | 90%     | 0.99        | 76%      | 1.00        | 3%       |
+| word_choice  | 0.93       | 55%     | 0.99        | 50%      | 0.99        | 41%      |
+| grammar      | 0.99       | 74%     | 1.00        | 7%       | 1.00        | 15%      |
+| word_order   | 0.96       | 64%     | 0.98        | 59%      | 0.99        | 59%      |
+| missing_word | 1.00       | 0%      | 1.00        | 0%       | 1.00        | 0%       |
+| extra_word   | 0.50       | 100%    | 0.50        | 88%      | 0.50        | 88%      |
+
+Negative candidate pools: 7945–9679 per type (vs 240–979 positive candidates). Vastly more features fire on clean last-word positions than on error positions.
+
+**Observations:**
+- **Negative features crush recall without proportional FP reduction.** N=25 loses 21pp recall for just 6 fewer FP. N=50 loses 33pp recall for 12 fewer FP. The trade-off is terrible — each FP saved costs ~3pp recall.
+- **The problem is probability compression.** Negative features fire on both clean AND error tokens (they fire on "normal-looking" token positions, which includes many error tokens too). The LR learns to weight them negatively, which pushes ALL probabilities down — not just clean-text probabilities. Thresholds must rise to 0.99+ to stay within FP budget, killing detection.
+- **Negative features are not discriminative enough.** With 8000+ candidates per type, the top-25 fire on ~70+ pairs each — but they fire on clean text by definition, meaning they also fire on non-error positions in error texts. The selection criterion (fire on clean, not on error positions) is necessary but not sufficient for a feature to be a useful "correctness signal". Most of these features encode generic language properties (common words, frequent subword patterns) rather than "this specific position is grammatically correct".
+- **The asymmetry is fundamental.** There are ~10x more negative candidates than positive candidates because most SAE features encode common language patterns, while error-specific features are rarer. The top negative features are common-word detectors, not correctness detectors — firing on "the", "is", "and" at word boundaries tells you nothing about whether a word is correctly used.
+- **extra_word FP dropped to 0 at N=50** but detection also dropped 100%→88%. The 12% loss (3 sentences) suggests the negative features interfere even with the strongest type.
+
+**Conclusions:**
+- Negative features fail as a "correctness counterweight". The hypothesis that clean-only features encode "this word looks grammatically normal" is wrong — they encode "this is a common word/pattern", which is orthogonal to correctness.
+- The survivorship bias in positive feature selection is not the bottleneck. The classifier already implicitly uses the absence of error features as correctness evidence (zero activations → low probability). Adding explicit "correctness features" just adds noise.
+- Revert all negative feature changes from `src/classifier.py`. Keep `select_negative_features_topn` removed, restore `train_ovr` and `predict_tokens_ovr` to positive-only.
+- The FP reduction direction is promising (24→12) but the recall cost is unacceptable. Better FP reduction approaches: per-type threshold tuning (already done), more training data, or better positive feature selection — not negative features.
+
+**Commit:** be90446
+
+---
+
+### Round 2: Diagnostic — coefficient analysis + overfitting check
+
+After the Round 1 results, we dug into WHY negative features hurt so badly. Added coefficient magnitude analysis, train vs test comparison, and C sweep.
+
+**Key diagnostic findings:**
+
+1. **NOT overfitting** — FP increases on both train AND test with negative features. The model generalizes, but in the wrong direction.
+2. **Coefficient imbalance is the smoking gun:**
+   - Spelling: neg_coef=0.077 vs pos_coef=0.020 (3.8x larger!)
+   - Grammar: neg_coef=0.094 vs pos_coef=0.046 (2x)
+   - `class_weight="balanced"` upweights each positive token ~42x, causing LR to over-rely on negative features
+   - Intercept shifts dramatically: spelling -4.0 → -6.4 with neg features
+3. **C sweep didn't help:** N=25 at C=0.01 still only F1=70.3%
+4. **Interesting bonus:** N_neg=0 with C=0.01 gave F1=82.2% (slightly better than C=1.0's 81.6%)
+
+**Root cause analysis:** The original negative feature selection was too broad. With ~8000-9700 candidates per type, the selected features encode "this is a common word" (fire on "the", "is", "and") rather than "this specific word is correct". They fire on nearly all text, providing no useful signal.
+
+### Round 3: Paired negative selection + hyperparameter tuning
+
+**Changed approach:** Instead of comparing "all clean last-word positions vs error word positions", compare only the specific clean word at the SAME position as each error word (paired comparison). For spelling/word_choice/grammar/word_order, the clean and error sentences differ at specific word indices — we only look at SAE activations at those positions. For missing_word/extra_word (word count changes), fall back to all clean positions.
+
+Also tested `class_weight=None` vs `"balanced"`, and different C values.
+
+**Paired selection reduced candidate pools dramatically:**
+- Grammar: 9679 → 574 candidates (paired)
+- Spelling: 9679 → 1131 candidates (paired)
+- Word_choice: 9679 → 862 candidates (paired)
+- Word_order: 9679 → 1097 candidates (paired)
+- Missing_word/extra_word: still ~8400+ (fallback, not truly paired)
+
+**Round 3a: Paired selection × class_weight sweep (N_neg=25):**
+
+| Config | F1 | P | R | FP# |
+|--------|-----|------|------|-----|
+| N_neg=0, balanced (baseline) | 81.6% | 83.3% | 80.0% | 24 |
+| N_neg=0, none | 70.4% | 88.0% | 58.7% | 12 |
+| N_neg=25, balanced, paired | 74.3% | 84.0% | 66.7% | 19 |
+| N_neg=25, none, paired | 70.9% | 88.1% | 59.3% | 12 |
+
+`class_weight=None` kills recall (80→59%). Balanced is clearly needed. Coefficient imbalance much improved (spelling neg=0.012 vs pos=0.022) but grammar still problematic and still collapsed at N_neg=25.
+
+**Round 3b: Fewer neg features + paired-only types (exclude missing_word/extra_word):**
+
+| N_neg | C | F1 | P | R | FP# |
+|-------|---|-----|------|------|-----|
+| 0 | 1.0 | 81.6% | 83.3% | 80.0% | 24 |
+| 3 | 1.0 | 81.4% | 82.8% | 80.0% | 25 |
+| **5** | **1.0** | **82.8%** | **83.7%** | **82.0%** | **24** |
+| 5 | 0.1 | 82.4% | 83.6% | 81.3% | 24 |
+| 7 | 1.0 | 77.8% | 85.6% | 71.3% | 18 |
+| 10 | 1.0 | 78.6% | 84.6% | 73.3% | 20 |
+| 25 | 1.0 | 75.6% | 85.0% | 68.0% | 18 |
+
+**N_neg=5/C=1.0 is the new best: F1=82.8% (+1.2pp), R=82.0% (+2pp), P=83.7% (+0.4pp).**
+
+Per-type breakdown at N_neg=5:
+
+| Type | N=0 Det | N=5 Det | Change |
+|------|---------|---------|--------|
+| spelling | 90% | 90% | — |
+| word_choice | 55% | 59% | +4pp |
+| grammar | 74% | 78% | +4pp |
+| word_order | 64% | 59% | -5pp |
+| extra_word | 100% | 100% | — |
+| missing_word | 0% | 0% | — |
+
+Coefficient magnitudes well-balanced at N_neg=5: spelling |neg|=0.014/|pos|=0.016, grammar |neg|=0.076/|pos|=0.081. The sweet spot is very sharp — N_neg=3 too weak, N_neg≥7 collapses grammar.
+
+### Final conclusions (Experiment 15)
+
+1. **Negative features CAN help, but require careful tuning:**
+   - Paired selection (comparing same-position clean vs error words) instead of broad selection
+   - Only for truly paired types (exclude missing_word/extra_word)
+   - Very few features (N_neg=5 out of 50 positive) — the effect is fragile
+2. **The improvement is modest but real:** +1.2pp F1, +2pp recall, same FP count
+3. **Grammar and word_choice benefit most** from negative features (+4pp each)
+4. **Word_order gets slightly worse** (-5pp) — its paired neg features may not be informative
+5. **Keeping class_weight="balanced" and C=1.0** — neither removing balanced nor changing C helps
+
+Best known config:
+- 50 positive features (position-aware top-N)
+- ~~5 paired negative features (for spelling/word_choice/grammar/word_order only)~~
+- OVR LR with class_weight="balanced", C=1.0
+- Per-type thresholds (FP ≤ 5%)
+- **F1=81.6%, P=83.3%, R=80.0%, FP#=24** (unchanged from Exp 13 baseline)
+
+**Decision:** Reverted all negative feature changes. The +1.2pp gain at N_neg=5 is too fragile (only works at exactly 5, collapses at 7+) and adds significant complexity (paired selection, PAIRED_ONLY_TYPES, per_type_neg_index). Kept the C and class_weight parameters in `train_ovr` as they're low-cost and useful for future experiments. The codebase at HEAD reflects the positive-only pipeline.
+
+**Commit:** be90446

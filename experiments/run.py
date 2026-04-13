@@ -1,6 +1,6 @@
-"""Experiment runner: Position-aware top-N feature selection with per-type thresholds.
+"""Best known pipeline: position-aware top-50 features, OVR LR.
 
-Uses position-aware top-50 feature selection + per-type FP-constrained thresholds.
+F1=81.6%, P=83.3%, R=80.0%, FP#=24 (Experiment 13 baseline).
 """
 
 import warnings
@@ -11,7 +11,8 @@ from src.cache import cached
 from src.data import ErrorType, generate_synthetic_pairs, split_train_test
 from src.model import extract_text_features
 from src.classifier import (
-    select_features_position_aware_topn, train_ovr, predict_tokens_ovr, Metrics,
+    select_features_position_aware_topn,
+    train_ovr, predict_tokens_ovr, Metrics,
 )
 
 # --------------- Parameters ---------------
@@ -29,7 +30,6 @@ EXTRACT_VERSION = "v2"
 EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w16k"
 
 TOP_N = 50
-THRESHOLDS = [0.5, 0.8, 0.9, 0.95]
 FP_BUDGET = 0.05
 
 
@@ -62,18 +62,20 @@ def main():
     train_features = [all_features[i] for i in train_idx]
     test_features = [all_features[i] for i in test_idx]
 
-    # 3. Select features (position-aware top-N)
+    # 3. Select features
+    print(f"\n=== Feature selection (top-{TOP_N}) ===")
     per_type_feats = select_features_position_aware_topn(
         train_features, LAYERS, train_pairs, top_n=TOP_N,
     )
     for et in ErrorType:
         feats = per_type_feats.get(et, {})
         total = sum(len(v) for v in feats.values())
-        by_layer = ", ".join(f"L{l}:{len(feats.get(l, set()))}" for l in LAYERS)
-        print(f"  {et.value}: {total} features ({by_layer})")
+        print(f"  {et.value}: {total} features")
 
-    # 4. Train OVR classifier
-    classifier = train_ovr(train_features, train_pairs, LAYERS, per_type_feats)
+    # 4. Train classifier
+    classifier = train_ovr(
+        train_features, train_pairs, LAYERS, per_type_feats,
+    )
 
     # 5. Score test set
     error_scores: list[dict[ErrorType, float]] = []
@@ -89,36 +91,7 @@ def main():
                 scores[et] = max((tp.error_probs.get(et, 0.0) for tp in tpreds), default=0.0)
             scores_list.append(scores)
 
-    # 6. Evaluate at global thresholds
-    for threshold in THRESHOLDS:
-        print(f"\n--- threshold={threshold} ---")
-        print(f"  {'Type':<15} {'Feats':>6} {'Det':>5} {'FP':>5}")
-        print(f"  {'-'*35}")
-
-        for et in ErrorType:
-            n_feats = sum(len(v) for v in per_type_feats.get(et, {}).values())
-            if et not in classifier.models:
-                print(f"  {et.value:<15} {n_feats:>6}     —  0.0%")
-                continue
-            type_idx = [i for i, p in enumerate(test_pairs) if p.error_type == et]
-            detected = sum(1 for i in type_idx if error_scores[i].get(et, 0) >= threshold)
-            fp = sum(1 for cs in clean_scores if cs.get(et, 0) >= threshold)
-            n = len(type_idx)
-            det_pct = detected / n * 100 if n else 0
-            fp_pct = fp / len(test_features) * 100
-            print(f"  {et.value:<15} {n_feats:>6} {det_pct:>4.0f}% {fp_pct:>4.1f}%")
-
-        tp = sum(1 for es in error_scores if any(
-            es.get(et, 0) >= threshold for et in classifier.models))
-        fn = len(error_scores) - tp
-        fp_total = sum(1 for cs in clean_scores if any(
-            cs.get(et, 0) >= threshold for et in classifier.models))
-        tn = len(clean_scores) - fp_total
-        cm = Metrics(tp=tp, fp=fp_total, tn=tn, fn=fn)
-        print(f"  Combined: F1={cm.f1:.1%}  P={cm.precision:.1%}  R={cm.recall:.1%}  FP#={cm.fp}")
-
-    # 7. Per-type threshold optimization (FP budget)
-    print(f"\n--- Per-type thresholds (FP ≤ {FP_BUDGET:.0%}) ---")
+    # 6. Per-type threshold optimization (FP budget)
     n_clean = len(clean_scores)
     max_fp = int(n_clean * FP_BUDGET)
     type_thresholds: dict[ErrorType, float] = {}
@@ -135,6 +108,7 @@ def main():
                 break
         type_thresholds[et] = best_t
 
+    print(f"\n=== Results (FP ≤ {FP_BUDGET:.0%}) ===")
     print(f"  {'Type':<15} {'Thresh':>6} {'Det':>5} {'FP':>5}")
     print(f"  {'-'*35}")
     for et in ErrorType:
@@ -157,7 +131,7 @@ def main():
         cs.get(et, 0) >= type_thresholds.get(et, 1.0) for et in classifier.models))
     tn = len(clean_scores) - fp_total
     cm = Metrics(tp=tp, fp=fp_total, tn=tn, fn=fn)
-    print(f"  Combined: F1={cm.f1:.1%}  P={cm.precision:.1%}  R={cm.recall:.1%}  FP#={cm.fp}")
+    print(f"\n  Combined: F1={cm.f1:.1%}  P={cm.precision:.1%}  R={cm.recall:.1%}  FP#={cm.fp}")
 
 
 if __name__ == "__main__":

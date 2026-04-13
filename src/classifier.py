@@ -335,6 +335,8 @@ def train_ovr(
     train_pairs: list[TextPair],
     layers: list[int],
     per_type_features: dict[ErrorType, dict[int, set[int]]],
+    C: float = 1.0,
+    class_weight: str | None = "balanced",
 ) -> OVRClassifier:
     """Train one binary LR per error type, each with its own feature set.
 
@@ -360,7 +362,6 @@ def train_ovr(
             print(f"  {et.value}: skipped (0 features selected)")
             continue
 
-        # Build feature vectors using this type's feature index
         X = []
         y = []
         for pf, pair in zip(train_pair_features, train_pairs):
@@ -371,12 +372,9 @@ def train_ovr(
             for pos in range(len(error_tokens)):
                 word_idx = word_map[pos]
                 if word_idx is not None and word_idx in pair.error_word_labels:
-                    # This token belongs to an error word
                     if pos == last_tok[word_idx]:
-                        # Last token: label it
                         is_this_type = pair.error_word_labels[word_idx] == et
                     else:
-                        # Non-last token of error word: skip
                         continue
                 else:
                     is_this_type = False
@@ -391,7 +389,7 @@ def train_ovr(
             clean_last_positions = set(clean_last_tok.values())
             for pos in range(len(clean_tokens)):
                 if pos not in clean_last_positions:
-                    continue  # Skip non-last tokens of words
+                    continue
                 vec = _token_activation_vector(clean_feats, pos, feat_index)
                 X.append(vec)
                 y.append(0)
@@ -403,7 +401,7 @@ def train_ovr(
             print(f"  {et.value}: skipped (only {n_pos} positive tokens)")
             continue
 
-        lr = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=42)
+        lr = LogisticRegression(C=C, class_weight=class_weight, max_iter=2000, random_state=42)
         lr.fit(X_arr, y_arr)
         print(f"  {et.value}: {n_pos} positive tokens, {len(feat_index)} features, trained")
         models[et] = lr
@@ -454,7 +452,7 @@ def predict_tokens_ovr(
 
     all_probs: dict = {}  # et -> dict[pos -> prob]
     for et, model in classifier.models.items():
-        feat_index = classifier.per_type_index[et]
+        feat_index = classifier.per_type_index.get(et, [])
         n_feats = len(feat_index)
         X = np.zeros((n_scored, n_feats), dtype=np.float32)
         for i, (layer, fid) in enumerate(feat_index):

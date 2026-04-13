@@ -36,18 +36,27 @@ Every experiment MUST follow this protocol:
 
 2. **Implement**: Modify `experiments/run.py`, `src/` modules, or any other code as needed. Previous experiment code is NOT sacred — each experiment is preserved as a git commit, so destructive changes to both the experiment runner and source modules are welcomed. Override, rewrite, or delete freely.
 
-3. **Run**: Execute via `uv run python3 -m experiments.run`. All cached data lives in `temp/` and is keyed so that parameter changes auto-regenerate stale data.
+3. **Run**: Execute via `uv run python3 -m experiments.run`. All cached data lives in `temp/` and is keyed so that parameter changes auto-regenerate stale data. **Always run synchronously** (e.g., `mode=sync` with a very large timeout like 90000000ms) — never launch experiments in the background/async and poll for results, as this wastes context and makes it harder to react to output.
 
-4. **Post-experiment**: Update the log entry with:
-   - Results summary (quantitative)
-   - Conclusions and observations
+4. **Critically analyze results**: Before writing conclusions, interrogate the results:
+   - **Is this expected?** If not, why not? What assumption was wrong?
+   - **Why did it work/fail?** Dig into the numbers — coefficient magnitudes, train vs test gaps, per-type breakdowns. Don't just report aggregate metrics.
+   - **Did we try everything?** Could a different hyperparameter, a refined selection criterion, or a variation on the approach change the outcome? Are there obvious follow-ups within the same experiment?
+   - **Can we push further?** Even for successful experiments — is there a way to squeeze more out of an idea that's working?
+   - If new ideas emerge, **iterate**: go back to step 2, adjust the approach, and re-run. A single experiment entry in the log can have multiple rounds of results. It's fine if one experiment takes 10x longer when that depth leads to real understanding. Log each iteration's results and reasoning in the same log entry.
+   - Update `experiments/ideas.md` with any new ideas that emerged, even from successful experiments.
+
+5. **Post-experiment**: Update the log entry with:
+   - Results summary (quantitative) for each iteration
+   - Analysis and reasoning for each round
+   - Final conclusions and observations
    - Git commit hash (added after committing)
 
-5. **Update ideas**: Review `experiments/ideas.md` — add new ideas that emerged, adjust priorities based on findings, remove ideas that were completed or became irrelevant.
+6. **Update ideas**: Review `experiments/ideas.md` — add new ideas that emerged, adjust priorities based on findings, remove ideas that were completed or became irrelevant.
 
-6. **Commit**: Stage and commit all source changes. The commit message should reference the experiment title. After committing, go back and add the commit hash to the log entry, then amend the commit.
+7. **Commit**: Stage and commit all source changes. The commit message should reference the experiment title. After committing, go back and add the commit hash to the log entry, then amend the commit.
 
-7. **Cleanup**: Remove experiment-specific complexity from `src/` and `experiments/run.py` that isn't justified by results. If the experiment failed or the gains were marginal, revert `src/` changes and simplify `run.py` back to the best known pipeline. Each experiment is preserved as a git commit, so nothing is lost. Commit the cleanup separately so the codebase at HEAD reflects the best known approach, not accumulated scaffolding from past experiments.
+8. **Cleanup**: Remove experiment-specific complexity from `src/` and `experiments/run.py` that isn't justified by results. If the experiment failed or the gains were marginal, revert `src/` changes and simplify `run.py` back to the best known pipeline. Each experiment is preserved as a git commit, so nothing is lost. Commit the cleanup separately so the codebase at HEAD reflects the best known approach, not accumulated scaffolding from past experiments.
 
 ### Experiment Code Style
 
