@@ -674,4 +674,4 @@ RF at global thresholds collapses rapidly: t=0.5 F1=74.8%, t=0.8 F1=50.7%, t=0.9
 - The subpopulation idea might work with 10x more data (6000 pairs), but that's independent of classifier choice.
 - Next: try negative features (clean-only activations as counterweight) — this addresses the asymmetry in feature space, which is orthogonal to classifier choice.
 
-**Commit:** *(pending)*
+**Commit:** 2a12042

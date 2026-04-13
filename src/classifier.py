@@ -13,7 +13,6 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 
 from src.data import ErrorType, TextPair, token_to_word_index, last_token_positions
@@ -336,14 +335,11 @@ def train_ovr(
     train_pairs: list[TextPair],
     layers: list[int],
     per_type_features: dict[ErrorType, dict[int, set[int]]],
-    classifier_type: str = "lr",
 ) -> OVRClassifier:
-    """Train one binary classifier per error type, each with its own feature set.
+    """Train one binary LR per error type, each with its own feature set.
 
     For each type, label=1 for tokens of that type, label=0 for everything else.
     Each classifier sees only features selected for its type.
-
-    classifier_type: 'lr' for LogisticRegression, 'rf' for RandomForest.
     """
     per_type_index = {
         et: _build_feature_index(feats)
@@ -407,16 +403,10 @@ def train_ovr(
             print(f"  {et.value}: skipped (only {n_pos} positive tokens)")
             continue
 
-        if classifier_type == "rf":
-            model = RandomForestClassifier(
-                n_estimators=100, max_depth=8, class_weight="balanced",
-                random_state=42, n_jobs=-1,
-            )
-        else:
-            model = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=42)
-        model.fit(X_arr, y_arr)
-        print(f"  {et.value}: {n_pos} positive tokens, {len(feat_index)} features, trained ({classifier_type})")
-        models[et] = model
+        lr = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=42)
+        lr.fit(X_arr, y_arr)
+        print(f"  {et.value}: {n_pos} positive tokens, {len(feat_index)} features, trained")
+        models[et] = lr
 
     return OVRClassifier(
         per_type_features=per_type_features,
