@@ -196,3 +196,46 @@ All experiments are logged here in chronological order. Append-only — never de
 - Next steps: FP-constrained threshold selection, better synthetic data (longer/harder examples), or investigate which SAE layers best serve each error type
 
 **Commit:** 78ce733
+
+---
+
+## Experiment 6: Per-type feature sets for OVR classifiers
+
+**Date:** 2026-04-13T16:30:00+02:00
+
+**Goal:** Give each OVR binary classifier its own feature set instead of sharing a global union. Currently all 6 classifiers see the same 43 features (union of per-type selections). This means the missing_word classifier sees spelling-specific features (noise), and vice versa. Per-type feature sets should reduce FP by removing irrelevant features from each classifier's input.
+
+**Hypothesis:** Disjoint per-type feature sets will reduce FP for weak classifiers (grammar, word_order, missing_word) whose signal drowns in features selected for other types. Strong classifiers (spelling, extra_word) should hold steady. May also reveal that some types have very few features (confirming they're not well-represented in SAE space at current resolution).
+
+**Parameters:**
+- Same cached data and features from Exp 4 (300 pairs, 50 per type)
+- Same layers [5, 10, 13, 17, 22], width 16k
+- New: `select_features_per_type()` returns features per ErrorType
+- Each binary LR trained only on its own type's features
+- Per-type threshold sweep: 0.5–0.99
+- Compare against Exp 5 (shared features)
+
+**Results:**
+- Per-type feature counts: spelling=30, extra_word=14, word_choice=1, word_order=1, grammar=0, missing_word=0
+- Grammar and missing_word have ZERO features → no classifier possible. Confirms these types have no distinctive SAE signal at 16k width.
+- Combined F1=68.6% (Precision=73.8%, Recall=64.0%) — regression from Exp 5 (72.0%) due to losing 2 types entirely
+- Per-type results:
+  - **extra_word**: F1=95.2% (91% det, 0% FP at ANY threshold!) — up from Exp 5's 91% det/1.3% FP. Removing noise features eliminated the last FP.
+  - **spelling**: F1=80.0% at t=0.99 (92% det, 6.7% FP) — comparable to Exp 5 (77.4% at 0.99)
+  - **word_choice**: F1=47.1% at t=0.5 (73% det, 20% FP, 1 feature) — weak, single feature
+  - **word_order**: F1=47.1% at t=0.5 (73% det, 20% FP, 1 feature) — same profile, single feature
+  - grammar: no model (0 features)
+  - missing_word: no model (0 features)
+- Type accuracy dramatically improved where models exist: spelling 100% (was 92%), extra_word 100% (was 73%), word_choice 75% (was 36%)
+- FP down from 44 → 17 (61% reduction). Remaining FPs: proper nouns triggering spelling, contractions ('s, n't) triggering word_choice, function words triggering word_choice
+- word_choice and word_order share the same single feature (L13) pushing identical FP rates
+
+**Conclusions:**
+- Per-type features are a clear win for **extra_word** (perfect 0% FP) and **type accuracy** (100% for both strong types)
+- The hypothesis about noise features hurting weak classifiers was partially wrong: grammar and missing_word don't have ANY features, so the issue is not noise — it's that these error types don't produce distinctive SAE activations at 16k width
+- The 43 "shared" features from Exp 5 were 70% spelling features. When those leaked into other classifiers, they produced FPs. Isolation fixed that.
+- For a practical 2-type detector (spelling + extra_word), per-type features are strictly better
+- To rescue grammar/missing_word: need wider SAEs (65k/262k), different layers, or fundamentally different data
+- Overall binary F1 dropped because recall tanked (64% vs 89%) — we simply can't detect grammar/missing_word at all now
+
+**Commit:** 5f1faeb

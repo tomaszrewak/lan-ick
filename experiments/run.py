@@ -1,7 +1,7 @@
-"""Experiment 5: One-vs-rest binary classifiers per error type.
+"""Experiment 6: Per-type feature sets for OVR classifiers.
 
-Flow: load cached data+features → select features → train 6 binary LRs →
-      per-type threshold sweep → combined evaluation → save results.
+Flow: load cached data+features → select features per type → train 6 binary LRs
+      (each with its own features) → per-type threshold sweep → combined evaluation.
 """
 
 import json
@@ -11,7 +11,7 @@ from src.cache import cached, TEMP_DIR
 from src.data import ErrorType, generate_synthetic_pairs, split_train_test
 from src.model import extract_text_features
 from src.classifier import (
-    select_features, train_ovr, predict_tokens_ovr, predict_sentence_ovr,
+    select_features_per_type, train_ovr, predict_tokens_ovr, predict_sentence_ovr,
     evaluate_ovr, OVRClassifier, Metrics,
 )
 
@@ -73,13 +73,18 @@ def main():
     train_pairs = [all_pairs[i] for i in train_idx]
     test_pairs = [all_pairs[i] for i in test_idx]
 
-    # 2. Select features and train OVR classifiers
-    error_feats = select_features(train_features, LAYERS, train_pairs, min_pair_ratio=MIN_PAIR_RATIO)
-    total = sum(len(v) for v in error_feats.values())
-    print(f"\nSelected {total} error features")
+    # 2. Select per-type features and train OVR classifiers
+    per_type_feats = select_features_per_type(train_features, LAYERS, train_pairs, min_pair_ratio=MIN_PAIR_RATIO)
 
-    print("Training OVR classifiers...")
-    classifier = train_ovr(train_features, train_pairs, LAYERS, error_feats)
+    print(f"\nPer-type feature counts:")
+    for et in ErrorType:
+        feats = per_type_feats.get(et, {})
+        total = sum(len(v) for v in feats.values())
+        by_layer = ", ".join(f"L{l}:{len(feats.get(l, set()))}" for l in LAYERS)
+        print(f"  {et.value}: {total} features ({by_layer})")
+
+    print("\nTraining OVR classifiers (per-type features)...")
+    classifier = train_ovr(train_features, train_pairs, LAYERS, per_type_feats)
     print(f"{classifier.summary()}")
 
     # 3. Per-type threshold sweep
@@ -206,7 +211,7 @@ def main():
 
     # 7. Save results
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = RESULTS_DIR / "experiment_5_ovr.json"
+    output_path = RESULTS_DIR / "experiment_6_ovr_pertype_feats.json"
 
     results = {
         "params": {
@@ -215,6 +220,10 @@ def main():
             "train_ratio": TRAIN_RATIO, "split_seed": SPLIT_SEED,
             "min_pair_ratio": MIN_PAIR_RATIO,
             "error_types": [et.value for et in ErrorType],
+        },
+        "per_type_feature_counts": {
+            et.value: sum(len(v) for v in per_type_feats.get(et, {}).values())
+            for et in ErrorType
         },
         "best_thresholds": {et.value: t for et, t in best_thresholds.items()},
         "per_type_sweep": type_sweep_results,

@@ -31,13 +31,16 @@ Completed as part of full 6-type expansion. Word order detected 82%, word choice
 ### ~~One-vs-rest binary classifiers per error type~~ ✓ Done (Experiment 5)
 Completed: 6 binary LRs trained. Spelling (92% det, 8% FP) and extra_word (91% det, 1.3% FP) work well. Grammar/word_order/missing_word have high FP — not separable with current features. Combined F1=72% (no improvement over Exp 4). Per-type insight is the main value.
 
+### ~~Per-type feature sets for OVR classifiers~~ ✓ Done (Experiment 6)
+Completed: Each type gets its own features. extra_word hit 0% FP (perfect), spelling 100% type accuracy. grammar and missing_word have ZERO features at 16k — not separable. word_choice and word_order each have 1 feature. FP down 61%. Combined F1=68.6% (lower recall since 2 types dropped entirely).
+
 ### FP-constrained threshold selection
 **Goal:** Instead of optimizing F1 per type (which picks low thresholds for weak classifiers), set a max FP budget per type (e.g., 5%) and find the highest detection rate within that budget. This would let us ship only the types that are reliably separable (spelling, extra_word) and suppress the rest.
-**Importance:** High — directly addresses the FP flood from weak classifiers seen in Exp 5.
+**Importance:** Medium — less urgent now that per-type features naturally suppress weak types (grammar/missing_word get 0 features).
 
 ### Compare 16k vs 65k vs 262k SAE widths
-**Goal:** Determine if wider SAEs produce sharper, more specific error-detection features. The 16k SAE may lump multiple error types into one feature; wider SAEs might separate them.
-**Importance:** High — directly affects detection granularity and the eventual classifier quality.
+**Goal:** Determine if wider SAEs produce sharper, more specific error-detection features. The 16k SAE may lump multiple error types into one feature; wider SAEs might separate them. Exp 6 showed grammar and missing_word have ZERO features at 16k — wider SAEs are the most likely path to rescuing these types.
+**Importance:** Very high — the main bottleneck for multi-type detection. Grammar/missing_word are invisible at 16k.
 
 ### Test with only layers 5–13 (drop upper layers)
 **Goal:** Check if restricting to layers 5, 10, 13 (29 features) still matches the full 5-layer result (41 features). Layers 17 and 22 contribute only 13 features and the signal tapers off there. If performance holds, the fused model can be truncated at layer 13 instead of 22 — roughly halving the LLM portion and making classification significantly faster.

@@ -73,6 +73,44 @@ def select_features(
     return error_features
 
 
+def select_features_per_type(
+    pair_features: list[dict],
+    layers: list[int],
+    train_pairs: list[TextPair],
+    min_pair_ratio: float = 0.5,
+) -> dict[ErrorType, dict[int, set[int]]]:
+    """Select SAE features independently for each error type.
+
+    Returns a dict mapping each ErrorType to its own {layer: set(fid)} dict.
+    """
+    from src.data import ErrorType
+
+    type_indices: dict[ErrorType, list[int]] = {}
+    for i, pair in enumerate(train_pairs):
+        type_indices.setdefault(pair.error_type, []).append(i)
+
+    per_type: dict[ErrorType, dict[int, set[int]]] = {}
+
+    for et, indices in type_indices.items():
+        n_type = len(indices)
+        min_pairs = max(2, int(n_type * min_pair_ratio))
+        feats: dict[int, set[int]] = {layer: set() for layer in layers}
+
+        for layer in layers:
+            counter: Counter[int] = Counter()
+            for idx in indices:
+                pf = pair_features[idx]
+                clean_fids = set(pf["clean"]["features"].get(layer, {}).keys())
+                error_fids = set(pf["error"]["features"].get(layer, {}).keys())
+                for fid in error_fids - clean_fids:
+                    counter[fid] += 1
+            feats[layer] = {fid for fid, cnt in counter.items() if cnt >= min_pairs}
+
+        per_type[et] = feats
+
+    return per_type
+
+
 def _build_feature_index(error_features: dict[int, set[int]]) -> list[tuple[int, int]]:
     """Build ordered list of (layer, feature_id) for consistent vector indexing."""
     index = []
@@ -268,81 +306,92 @@ class Metrics:
 
 @dataclass
 class OVRClassifier:
-    """One-vs-rest: independent binary LR per error type."""
-    error_features: dict[int, set[int]]
-    feature_index: list[tuple[int, int]]
+    """One-vs-rest: independent binary LR per error type.
+
+    Each type has its own feature set and feature index.
+    """
+    per_type_features: dict[ErrorType, dict[int, set[int]]]
+    per_type_index: dict[ErrorType, list[tuple[int, int]]]
     layers: list[int]
     models: dict[ErrorType, LogisticRegression] = field(default_factory=dict)
     thresholds: dict[ErrorType, float] = field(default_factory=dict)
 
-    @property
-    def total_features(self) -> int:
-        return len(self.feature_index)
-
     def summary(self) -> str:
-        parts = [f"layer {l}: {len(self.error_features.get(l, set()))} features"
-                 for l in self.layers]
-        types = ", ".join(et.value for et in self.models)
-        return (f"OVRClassifier({', '.join(parts)}, total={self.total_features}, "
-                f"types=[{types}])")
+        lines = []
+        for et in self.models:
+            n = len(self.per_type_index.get(et, []))
+            lines.append(f"{et.value}: {n} features")
+        return f"OVRClassifier({', '.join(lines)})"
 
 
 def train_ovr(
     train_pair_features: list[dict],
     train_pairs: list[TextPair],
     layers: list[int],
-    error_features: dict[int, set[int]],
+    per_type_features: dict[ErrorType, dict[int, set[int]]],
 ) -> OVRClassifier:
-    """Train one binary LR per error type.
+    """Train one binary LR per error type, each with its own feature set.
 
     For each type, label=1 for tokens of that type, label=0 for everything else.
+    Each classifier sees only features selected for its type.
     """
-    feature_index = _build_feature_index(error_features)
-    if not feature_index:
-        raise ValueError("No error features selected — cannot train classifier")
+    per_type_index = {
+        et: _build_feature_index(feats)
+        for et, feats in per_type_features.items()
+    }
 
-    # Build token dataset once: (vector, word_idx, error_type_or_None) per token
-    token_data: list[tuple[np.ndarray, ErrorType | None]] = []
-
-    for pf, pair in zip(train_pair_features, train_pairs):
-        # Error text tokens
-        error_feats = pf["error"]
-        error_tokens = error_feats["tokens"]
-        word_map = token_to_word_index(pair.error, error_tokens)
-        for pos in range(len(error_tokens)):
-            vec = _token_activation_vector(error_feats, pos, feature_index)
-            word_idx = word_map[pos]
-            if word_idx is not None and word_idx in pair.error_word_labels:
-                token_data.append((vec, pair.error_word_labels[word_idx]))
-            else:
-                token_data.append((vec, None))
-
-        # Clean text tokens — all None (clean)
-        clean_feats = pf["clean"]
-        for pos in range(len(clean_feats["tokens"])):
-            vec = _token_activation_vector(clean_feats, pos, feature_index)
-            token_data.append((vec, None))
-
-    X_all = np.array([td[0] for td in token_data])
-    labels_all = [td[1] for td in token_data]
-
-    print(f"  OVR training on {len(X_all)} tokens")
+    # Count total tokens for logging
+    n_tokens = sum(
+        len(pf["error"]["tokens"]) + len(pf["clean"]["tokens"])
+        for pf in train_pair_features
+    )
+    print(f"  OVR training on {n_tokens} tokens")
 
     models = {}
     for et in ErrorType:
-        y = np.array([1 if lbl == et else 0 for lbl in labels_all])
-        n_pos = y.sum()
+        feat_index = per_type_index.get(et, [])
+        if not feat_index:
+            print(f"  {et.value}: skipped (0 features selected)")
+            continue
+
+        # Build feature vectors using this type's feature index
+        X = []
+        y = []
+        for pf, pair in zip(train_pair_features, train_pairs):
+            error_feats = pf["error"]
+            error_tokens = error_feats["tokens"]
+            word_map = token_to_word_index(pair.error, error_tokens)
+            for pos in range(len(error_tokens)):
+                vec = _token_activation_vector(error_feats, pos, feat_index)
+                word_idx = word_map[pos]
+                if word_idx is not None and word_idx in pair.error_word_labels:
+                    is_this_type = pair.error_word_labels[word_idx] == et
+                else:
+                    is_this_type = False
+                X.append(vec)
+                y.append(1 if is_this_type else 0)
+
+            clean_feats = pf["clean"]
+            for pos in range(len(clean_feats["tokens"])):
+                vec = _token_activation_vector(clean_feats, pos, feat_index)
+                X.append(vec)
+                y.append(0)
+
+        X_arr = np.array(X)
+        y_arr = np.array(y)
+        n_pos = y_arr.sum()
         if n_pos < 2:
             print(f"  {et.value}: skipped (only {n_pos} positive tokens)")
             continue
+
         lr = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=42)
-        lr.fit(X_all, y)
-        print(f"  {et.value}: {n_pos} positive tokens, trained")
+        lr.fit(X_arr, y_arr)
+        print(f"  {et.value}: {n_pos} positive tokens, {len(feat_index)} features, trained")
         models[et] = lr
 
     return OVRClassifier(
-        error_features=error_features,
-        feature_index=feature_index,
+        per_type_features=per_type_features,
+        per_type_index=per_type_index,
         layers=layers,
         models=models,
         thresholds={et: 0.5 for et in models},
@@ -355,17 +404,16 @@ def predict_tokens_ovr(
     text_features: dict,
     classifier: OVRClassifier,
 ) -> list[TokenPrediction]:
-    """Score each token with all OVR classifiers."""
+    """Score each token with all OVR classifiers, each using its own features."""
     tokens = text_features["tokens"]
     predictions = []
 
     for pos in range(len(tokens)):
-        vec = _token_activation_vector(text_features, pos, classifier.feature_index)
-        vec_2d = vec.reshape(1, -1)
-
         error_probs = {}
         for et, model in classifier.models.items():
-            p = float(model.predict_proba(vec_2d)[0, 1])
+            feat_index = classifier.per_type_index[et]
+            vec = _token_activation_vector(text_features, pos, feat_index)
+            p = float(model.predict_proba(vec.reshape(1, -1))[0, 1])
             error_probs[et] = p
 
         # p_error = max probability across all types

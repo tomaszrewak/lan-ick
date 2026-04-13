@@ -49,6 +49,10 @@ Every experiment MUST follow this protocol:
 
 `experiments/run.py` should read **top-to-bottom** like a script: load data → set up model → run analysis → print/save results. It should compose building blocks from `src/` rather than implementing low-level logic. Keep it easy to scan and understand at a glance — someone reading the experiment should see the "what" without getting lost in the "how".
 
+### Failed Experiments
+
+If an experiment does not bring meaningful improvement, **favor the simpler approach**. Don't hesitate to revert changes to `src/` modules when the added complexity isn't justified by results. Each experiment is preserved as a git commit, so nothing is lost — but the codebase at HEAD should reflect the best known approach, not accumulated complexity from failed ideas.
+
 ## Data Caching
 
 All temporary/generated files go in `temp/` — never in the project root. The `temp/` folder is gitignored. Deleting it should have no effect other than requiring regeneration on next run.
