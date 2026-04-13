@@ -108,6 +108,10 @@ Completed: Spelling is 100% detected and classified. Grammar is detected (90%) b
 **Goal:** Test whether the same features fire on spelling errors in other languages (e.g., German, Polish). Gemma 3 is multilingual.
 **Importance:** Low — stretch goal, but could significantly broaden the impact of the research.
 
+### Small neural network classifier
+**Goal:** RF failed due to poor probability calibration (Exp 14), but the subpopulation hypothesis remains valid — some error subsets likely don't conform to LR's single linear boundary. A small MLP (e.g., 2 hidden layers, 32–64 units, sigmoid output) could capture non-linear boundaries while producing well-calibrated probabilities via sigmoid, unlike RF's tree-fraction approach. Trains with binary cross-entropy, same OVR structure. With 50 features and ~5k training tokens, a small NN should generalize — just need to regularize (dropout, early stopping).
+**Importance:** Medium-low — LR works well and the bottleneck is more likely feature quality than classifier capacity. Worth revisiting after negative features and more data.
+
 ### Fuse LLM + SAE into a single optimized model
 **Goal:** Truncate the LLM at the best layer and attach the SAE encoder, producing a single smaller model that takes text in and outputs error features directly.
 **Importance:** Low (for now) — the end goal, but requires identifying the right layer/features first.
