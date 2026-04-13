@@ -1,18 +1,28 @@
-"""Experiment 6: Per-type feature sets for OVR classifiers.
+"""Experiment 7: Feature selection method comparison.
 
-Flow: load cached data+features → select features per type → train 6 binary LRs
-      (each with its own features) → per-type threshold sweep → combined evaluation.
+Flow: load cached data+features → run 6 different feature selection methods →
+      train OVR classifiers for each → evaluate all at fixed thresholds → compare.
 """
 
 import json
+import warnings
 from collections import defaultdict
+
+from sklearn.exceptions import ConvergenceWarning
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
 from src.cache import cached, TEMP_DIR
 from src.data import ErrorType, generate_synthetic_pairs, split_train_test
 from src.model import extract_text_features
 from src.classifier import (
-    select_features_per_type, train_ovr, predict_tokens_ovr, predict_sentence_ovr,
-    evaluate_ovr, OVRClassifier, Metrics,
+    select_features_per_type,
+    select_features_relaxed,
+    select_features_paired_token_diff,
+    select_features_magnitude_diff,
+    select_features_ttest,
+    select_features_top_k_error,
+    train_ovr, predict_tokens_ovr, predict_sentence_ovr,
+    evaluate_ovr, Metrics,
 )
 
 # --------------- Experiment parameters ---------------
@@ -21,7 +31,6 @@ LAYERS = [5, 10, 13, 17, 22]
 WIDTH = "16k"
 TRAIN_RATIO = 0.75
 SPLIT_SEED = 42
-MIN_PAIR_RATIO = 0.5
 
 N_PAIRS = 300
 MIN_WORDS = 8
@@ -35,7 +44,7 @@ RESULTS_DIR = TEMP_DIR / "results"
 
 EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_v4_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
 
-TYPE_THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99]
+EVAL_THRESHOLDS = [0.5, 0.8, 0.9, 0.95]
 
 
 # --------------- Main ---------------
@@ -47,12 +56,6 @@ def main():
         lambda: generate_synthetic_pairs(N_PAIRS, MIN_WORDS, MAX_WORDS, DATA_SEED),
     )
     print(f"Loaded {len(all_pairs)} pairs")
-
-    type_counts = defaultdict(int)
-    for p in all_pairs:
-        type_counts[p.error_type.value] += 1
-    for et, cnt in sorted(type_counts.items()):
-        print(f"  {et}: {cnt}")
 
     train_idx, test_idx = split_train_test(all_pairs, TRAIN_RATIO, SPLIT_SEED)
     print(f"Split: {len(train_idx)} train, {len(test_idx)} test")
@@ -73,166 +76,196 @@ def main():
     train_pairs = [all_pairs[i] for i in train_idx]
     test_pairs = [all_pairs[i] for i in test_idx]
 
-    # 2. Select per-type features and train OVR classifiers
-    per_type_feats = select_features_per_type(train_features, LAYERS, train_pairs, min_pair_ratio=MIN_PAIR_RATIO)
-
-    print(f"\nPer-type feature counts:")
-    for et in ErrorType:
-        feats = per_type_feats.get(et, {})
-        total = sum(len(v) for v in feats.values())
-        by_layer = ", ".join(f"L{l}:{len(feats.get(l, set()))}" for l in LAYERS)
-        print(f"  {et.value}: {total} features ({by_layer})")
-
-    print("\nTraining OVR classifiers (per-type features)...")
-    classifier = train_ovr(train_features, train_pairs, LAYERS, per_type_feats)
-    print(f"{classifier.summary()}")
-
-    # 3. Per-type threshold sweep
-    # For each type, find the threshold that maximizes detection while keeping FP minimal
-    print(f"\n{'='*60}")
-    print("PER-TYPE THRESHOLD SWEEP")
-    print(f"{'='*60}")
-
     # Group test pairs by type
     test_by_type: dict[ErrorType, list[tuple[dict, dict]]] = defaultdict(list)
     for pf, pair in zip(test_features, test_pairs):
         test_by_type[pair.error_type].append((pf, pair))
 
-    best_thresholds = {}
-    type_sweep_results = {}
+    # 2. Define selection methods to compare
+    methods = {
+        "baseline": lambda: select_features_per_type(
+            train_features, LAYERS, train_pairs, min_pair_ratio=0.5),
+        "relaxed_30": lambda: select_features_relaxed(
+            train_features, LAYERS, train_pairs, min_pair_ratio=0.3),
+        "paired_diff": lambda: select_features_paired_token_diff(
+            train_features, LAYERS, train_pairs, min_pair_ratio=0.3),
+        "magnitude_diff_10": lambda: select_features_magnitude_diff(
+            train_features, LAYERS, train_pairs, top_k=10),
+        "magnitude_diff_20": lambda: select_features_magnitude_diff(
+            train_features, LAYERS, train_pairs, top_k=20),
+        "ttest": lambda: select_features_ttest(
+            train_features, LAYERS, train_pairs, p_threshold=0.05),
+        "ttest_relaxed": lambda: select_features_ttest(
+            train_features, LAYERS, train_pairs, p_threshold=0.10),
+        "top_k_error_10": lambda: select_features_top_k_error(
+            train_features, LAYERS, train_pairs, top_k=10),
+        "top_k_error_20": lambda: select_features_top_k_error(
+            train_features, LAYERS, train_pairs, top_k=20),
+    }
 
-    for et in ErrorType:
-        if et not in classifier.models:
-            print(f"\n  {et.value}: NO MODEL (skipped)")
+    all_results = {}
+
+    # 3. Run each method
+    for method_name, select_fn in methods.items():
+        print(f"\n{'='*70}")
+        print(f"METHOD: {method_name}")
+        print(f"{'='*70}")
+
+        per_type_feats = select_fn()
+
+        # Report feature counts
+        feat_counts = {}
+        for et in ErrorType:
+            feats = per_type_feats.get(et, {})
+            total = sum(len(v) for v in feats.values())
+            feat_counts[et] = total
+            by_layer = ", ".join(f"L{l}:{len(feats.get(l, set()))}" for l in LAYERS)
+            print(f"  {et.value}: {total} features ({by_layer})")
+
+        # Train OVR classifiers
+        print(f"  Training...")
+        try:
+            classifier = train_ovr(train_features, train_pairs, LAYERS, per_type_feats)
+        except Exception as e:
+            print(f"  FAILED: {e}")
+            all_results[method_name] = {"error": str(e)}
             continue
 
-        print(f"\n  {et.value}:")
-        type_pairs = test_by_type[et]
-        best_f1 = 0.0
-        best_t = 0.5
-        sweep = {}
+        # Evaluate: compute predictions ONCE, then slice by threshold
+        method_result = {
+            "feature_counts": {et.value: cnt for et, cnt in feat_counts.items()},
+            "thresholds": {},
+        }
 
-        for threshold in TYPE_THRESHOLDS:
-            # Detection: how many error sentences of this type are caught?
-            detected = 0
-            for pf, pair in type_pairs:
-                tpreds = predict_tokens_ovr(pf["error"], classifier)
-                max_p = max((tp.error_probs.get(et, 0.0) for tp in tpreds), default=0.0)
-                if max_p >= threshold:
-                    detected += 1
+        # Pre-compute max P(error_type) per test pair, for error and clean texts
+        # error_scores[i][et] = max P(et) across tokens in error text of pair i
+        # clean_scores[i][et] = max P(et) across tokens in clean text of pair i
+        error_scores: list[dict[ErrorType, float]] = []
+        clean_scores: list[dict[ErrorType, float]] = []
 
-            # FP: how many clean sentences get flagged by this type's classifier?
-            fp = 0
-            for pf, pair in zip(test_features, test_pairs):
-                tpreds = predict_tokens_ovr(pf["clean"], classifier)
-                max_p = max((tp.error_probs.get(et, 0.0) for tp in tpreds), default=0.0)
-                if max_p >= threshold:
-                    fp += 1
+        print(f"  Evaluating on {len(test_features)} test pairs...")
+        for pf in test_features:
+            # Error text
+            tpreds_error = predict_tokens_ovr(pf["error"], classifier)
+            e_scores = {}
+            for et in classifier.models:
+                e_scores[et] = max((tp.error_probs.get(et, 0.0) for tp in tpreds_error), default=0.0)
+            error_scores.append(e_scores)
 
-            n = len(type_pairs)
-            det_pct = detected / n * 100 if n else 0
-            fp_pct = fp / len(test_features) * 100
+            # Clean text
+            tpreds_clean = predict_tokens_ovr(pf["clean"], classifier)
+            c_scores = {}
+            for et in classifier.models:
+                c_scores[et] = max((tp.error_probs.get(et, 0.0) for tp in tpreds_clean), default=0.0)
+            clean_scores.append(c_scores)
 
-            # F1 treating this type's detection as TP and clean-flagged as FP
-            prec = detected / (detected + fp) if (detected + fp) else 0
-            rec = detected / n if n else 0
-            f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
+        # Now evaluate at each threshold from pre-computed scores
+        for threshold in EVAL_THRESHOLDS:
+            type_metrics = {}
+            for et in ErrorType:
+                if et not in classifier.models:
+                    type_metrics[et.value] = {"detected": 0, "n": 0, "fp": 0, "det_pct": 0, "fp_pct": 0}
+                    continue
 
-            sweep[threshold] = {"detected": detected, "n": n, "det_pct": round(det_pct, 1),
-                                "fp": fp, "fp_pct": round(fp_pct, 1), "f1": round(f1, 4)}
+                # Detection: error texts of this type
+                type_test_indices = [i for i, pair in enumerate(test_pairs) if pair.error_type == et]
+                detected = sum(1 for i in type_test_indices if error_scores[i].get(et, 0) >= threshold)
 
-            marker = ""
-            if f1 > best_f1:
-                best_f1 = f1
-                best_t = threshold
-                marker = " ← best"
-            print(f"    t={threshold}: det={detected}/{n} ({det_pct:.0f}%), FP={fp} ({fp_pct:.1f}%), F1={f1:.1%}{marker}")
+                # FP: clean texts flagged by this type
+                fp = sum(1 for cs in clean_scores if cs.get(et, 0) >= threshold)
 
-        best_thresholds[et] = best_t
-        type_sweep_results[et.value] = {"sweep": {str(k): v for k, v in sweep.items()}, "best_threshold": best_t}
+                n = len(type_test_indices)
+                type_metrics[et.value] = {
+                    "detected": detected, "n": n,
+                    "det_pct": round(detected / n * 100, 1) if n else 0,
+                    "fp": fp, "fp_pct": round(fp / len(test_features) * 100, 1),
+                }
 
-    # 4. Combined evaluation with best per-type thresholds
-    print(f"\n{'='*60}")
-    print("COMBINED EVALUATION (best per-type thresholds)")
-    print(f"{'='*60}")
+            # Combined binary evaluation (from pre-computed scores)
+            tp = sum(1 for es in error_scores if any(
+                es.get(et, 0) >= threshold for et in classifier.models))
+            fn = len(error_scores) - tp
+            fp_total = sum(1 for cs in clean_scores if any(
+                cs.get(et, 0) >= threshold for et in classifier.models))
+            tn = len(clean_scores) - fp_total
+            combined = Metrics(tp=tp, fp=fp_total, tn=tn, fn=fn)
 
-    classifier.thresholds = best_thresholds
-    print("  Thresholds:", {et.value: t for et, t in best_thresholds.items()})
+            method_result["thresholds"][str(threshold)] = {
+                "per_type": type_metrics,
+                "combined": combined.to_dict(),
+            }
 
-    metrics = evaluate_ovr(test_features, classifier)
-    print(f"\n{metrics.confusion_str()}")
-    print(f"\n{metrics.summary()}")
+        # Print summary table at threshold=0.9
+        t09 = method_result["thresholds"].get("0.9", method_result["thresholds"].get("0.5"))
+        print(f"\n  At threshold=0.9:")
+        print(f"  {'Type':<15} {'Feats':>6} {'Det':>5} {'FP':>5}")
+        print(f"  {'-'*35}")
+        for et in ErrorType:
+            n_feats = feat_counts.get(et, 0)
+            tm = t09["per_type"][et.value]
+            det_str = f"{tm['det_pct']:.0f}%" if tm['n'] else "—"
+            fp_str = f"{tm['fp_pct']:.1f}%"
+            print(f"  {et.value:<15} {n_feats:>6} {det_str:>5} {fp_str:>5}")
+        cm = t09["combined"]
+        print(f"  Combined: F1={cm['f1']:.1%}  P={cm['precision']:.1%}  R={cm['recall']:.1%}")
 
-    # 5. Per-type detection at combined thresholds
-    print(f"\n{'='*60}")
-    print("PER-TYPE DETECTION (combined thresholds)")
-    print(f"{'='*60}")
+        all_results[method_name] = method_result
 
-    type_det = defaultdict(lambda: {"total": 0, "detected": 0, "correct_type": 0})
-    for pf, pair in zip(test_features, test_pairs):
-        et = pair.error_type
-        type_det[et.value]["total"] += 1
-        pred = predict_sentence_ovr(pf["error"], classifier)
-        if pred.has_errors:
-            type_det[et.value]["detected"] += 1
-            if pred.predicted_type == et:
-                type_det[et.value]["correct_type"] += 1
+    # 4. Summary comparison across methods
+    print(f"\n{'='*70}")
+    print("SUMMARY COMPARISON (threshold=0.9)")
+    print(f"{'='*70}")
 
-    print(f"\n  {'Type':<15} {'Total':>6} {'Detected':>9} {'Det%':>6} {'CorrectType':>12} {'TypeAcc%':>9}")
-    print(f"  {'-'*58}")
+    header = f"  {'Method':<22}"
     for et in ErrorType:
-        s = type_det[et.value]
-        det_pct = s["detected"] / s["total"] * 100 if s["total"] else 0
-        type_acc = s["correct_type"] / s["detected"] * 100 if s["detected"] else 0
-        print(f"  {et.value:<15} {s['total']:>6} {s['detected']:>9} {det_pct:>5.1f}% {s['correct_type']:>12} {type_acc:>8.1f}%")
+        header += f" {et.value[:6]:>7}"
+    header += f" {'F1':>6} {'FP':>4}"
+    print(header)
+    print(f"  {'-'*(22 + 7*6 + 11)}")
 
-    # 6. FP analysis
-    print(f"\n{'='*60}")
-    print("FALSE POSITIVE EXAMPLES")
-    print(f"{'='*60}")
+    for method_name, mr in all_results.items():
+        if "error" in mr:
+            print(f"  {method_name:<22} FAILED: {mr['error'][:40]}")
+            continue
+        t09 = mr["thresholds"].get("0.9", mr["thresholds"].get("0.5"))
+        row = f"  {method_name:<22}"
+        for et in ErrorType:
+            tm = t09["per_type"][et.value]
+            if tm["n"]:
+                row += f" {tm['det_pct']:>6.0f}%"
+            else:
+                row += f"     —"
+        cm = t09["combined"]
+        row += f" {cm['f1']:>5.1%} {cm['fp']:>4}"
+        print(row)
 
-    fp_details = []
-    fp_count = 0
-    for pf, pair in zip(test_features, test_pairs):
-        pred = predict_sentence_ovr(pf["clean"], classifier)
-        if pred.has_errors:
-            fp_count += 1
-            top = sorted(pred.token_predictions, key=lambda t: t.p_error, reverse=True)[:3]
-            if fp_count <= 10:
-                top_str = ", ".join(f"'{t.token}'={t.p_error:.3f}({t.predicted_type.value if t.predicted_type else '?'})" for t in top)
-                print(f"\n  FP: {pair.clean}")
-                print(f"    predicted={pred.predicted_type.value if pred.predicted_type else '?'}, top: {top_str}")
-            fp_details.append({
-                "sentence": pair.clean,
-                "max_p_error": round(pred.max_p_error, 4),
-                "predicted_type": pred.predicted_type.value if pred.predicted_type else None,
-            })
-    print(f"\n  Total FPs: {fp_count}")
+    # Also print at threshold=0.5 for comparison
+    print(f"\n{'='*70}")
+    print("SUMMARY COMPARISON (threshold=0.5)")
+    print(f"{'='*70}")
+    print(header)
+    print(f"  {'-'*(22 + 7*6 + 11)}")
 
-    # 7. Save results
+    for method_name, mr in all_results.items():
+        if "error" in mr:
+            continue
+        t05 = mr["thresholds"]["0.5"]
+        row = f"  {method_name:<22}"
+        for et in ErrorType:
+            tm = t05["per_type"][et.value]
+            if tm["n"]:
+                row += f" {tm['det_pct']:>6.0f}%"
+            else:
+                row += f"     —"
+        cm = t05["combined"]
+        row += f" {cm['f1']:>5.1%} {cm['fp']:>4}"
+        print(row)
+
+    # 5. Save results
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = RESULTS_DIR / "experiment_6_ovr_pertype_feats.json"
-
-    results = {
-        "params": {
-            "layers": LAYERS, "width": WIDTH,
-            "n_pairs": N_PAIRS,
-            "train_ratio": TRAIN_RATIO, "split_seed": SPLIT_SEED,
-            "min_pair_ratio": MIN_PAIR_RATIO,
-            "error_types": [et.value for et in ErrorType],
-        },
-        "per_type_feature_counts": {
-            et.value: sum(len(v) for v in per_type_feats.get(et, {}).values())
-            for et in ErrorType
-        },
-        "best_thresholds": {et.value: t for et, t in best_thresholds.items()},
-        "per_type_sweep": type_sweep_results,
-        "combined_metrics": metrics.to_dict(),
-        "per_type_detection": {k: v for k, v in type_det.items()},
-        "false_positives": fp_details,
-    }
+    output_path = RESULTS_DIR / "experiment_7_feature_selection.json"
     with open(output_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(all_results, f, indent=2, default=str)
     print(f"\nResults saved to {output_path}")
 
 

@@ -239,3 +239,63 @@ All experiments are logged here in chronological order. Append-only — never de
 - Overall binary F1 dropped because recall tanked (64% vs 89%) — we simply can't detect grammar/missing_word at all now
 
 **Commit:** 5f1faeb
+
+---
+
+## Experiment 7: Feature selection method comparison
+
+**Date:** 2026-04-13T17:00:00+02:00
+
+**Goal:** The current feature selection (binary presence: fires in error but not clean) yields 0 features for grammar and missing_word. Explore fundamentally different selection approaches to find features that actually distinguish error from clean text. Compare multiple methods head-to-head.
+
+**Hypothesis:** The binary presence method is too coarse — it misses features that fire in both error and clean text but with different magnitudes or at different positions. Methods that compare activations at the same token position (error word vs its clean counterpart) or that use activation magnitude differences should find features invisible to the binary approach, especially for grammar/missing_word.
+
+**Methods to compare:**
+1. **baseline**: Current binary presence (error_fids - clean_fids), min_pair_ratio=0.5
+2. **relaxed**: Same as baseline but min_pair_ratio=0.3
+3. **paired_token_diff**: At each error word position, compare activation in error vs clean at the same token position. Feature selected if it activates more in error text at error positions across enough pairs.
+4. **magnitude_diff**: Per-feature mean activation in error texts minus mean in clean texts. Top-K by magnitude difference.
+5. **ttest**: Welch's t-test on per-feature activations between error-word tokens and clean tokens. Select by p-value.
+6. **top_k_error**: Take features with highest mean activation at error word positions, regardless of clean comparison. Top-K.
+
+Each method produces per-type feature sets. Train OVR classifiers for each. Compare per-type detection and FP.
+
+**Parameters:**
+- Same cached data and features (300 pairs, 50 per type)
+- Same layers [5, 10, 13, 17, 22], width 16k
+- Fixed threshold=0.9 for comparison (no sweep — too slow with 6 methods)
+- Also report feature count per method × type to understand selectivity
+
+**Results:**
+
+Summary at threshold=0.9 (det% / FP%):
+
+| Method          | #Feats (spelling/grammar/missing) | Spelling | Word Choice | Grammar  | Word Order | Missing Word | Extra Word | Combined F1 |
+|-----------------|----------------------------------|----------|-------------|----------|------------|-------------|------------|-------------|
+| baseline        | 30 / 0 / 0                       | 100/21%  | 36/4%       | —        | 18/1%      | —           | 91/0%      | 63.8%       |
+| **relaxed_30**  | 122 / 18 / 3                     | 100/28%  | 73/13%      | 75/9%    | 54/5%      | 22/5%       | 91/0%      | **78.0%**   |
+| paired_diff     | 191 / 24 / 5                     | 100/25%  | 73/21%      | 80/12%   | 73/20%     | 0/0%        | 82/0%      | 75.5%       |
+| magnitude_diff_10 | 50 / 50 / 50                   | 15/8%    | 82/9%       | 85/21%   | 27/15%     | 56/17%      | 91/1%      | 71.2%       |
+| magnitude_diff_20 | 100 / 100 / 100                | 77/20%   | 82/16%      | 75/17%   | 18/17%     | 44/31%      | 73/0%      | 71.8%       |
+| ttest           | 61 / 7 / 4                       | 100/29%  | 64/9%       | 75/35%   | 46/15%     | 11/3%       | 91/0%      | 71.6%       |
+| ttest_relaxed   | 91 / 14 / 10                     | 100/24%  | 73/11%      | 85/37%   | 54/19%     | 33/1%       | 82/1%      | 72.9%       |
+| top_k_error_10  | 50 / 50 / 50                     | 0/5%     | 82/31%      | 85/20%   | 18/15%     | 22/20%      | 18/9%      | 66.3%       |
+
+Best method: **relaxed_30** (F1=78.0%, P=67.7%, R=92.0%) — lowering the min_pair_ratio from 0.5 to 0.3 is the single most impactful change.
+
+Key observations:
+- **Grammar detection unlocked**: relaxed_30 gets 18 features for grammar → 75% detection at 9.3% FP. Baseline found 0 features.
+- **Missing_word still weak**: Even relaxed_30 only gets 3 features → 22% detection. The signal is genuinely sparse.
+- **paired_diff** finds grammar signal (80% det) but trades it for high FP (12%) and high word_order FP (20%).
+- **magnitude_diff and top_k_error** methods (fixed top-K per layer) perform poorly overall — they select features without regard to error specificity, leading to high FP and even destroying spelling detection (15% det for magnitude_diff_10, 0% for top_k_error_10).
+- **ttest** finds grammar (75-85% det) but with unacceptable FP (35-37%) — statistical significance ≠ discriminative power.
+- **Convergence warnings** (suppressed but present) indicate classifier is hitting max_iter=2000 for methods with 100+ features. Partial convergence, not a blocking issue.
+
+**Conclusions:**
+- The simplest improvement wins: just lowering the ratio threshold from 0.5 to 0.3 (relaxed_30) gives the best F1 (78.0% vs 63.8% baseline), unlocks grammar, and is the least complex change.
+- Methods that compare token-level activations (paired_diff, ttest) find grammar signal but produce too many FPs — they're sensitive to any activation difference, not just error-indicating ones.
+- Fixed-K methods (magnitude_diff, top_k_error) are fundamentally flawed for this task — they ignore error specificity and select "commonly active" features rather than "error-indicating" features. Spelling detection collapses because the top-K features at error positions aren't spelling-specific.
+- The binary presence approach (baseline/relaxed) remains the best paradigm. The key lever is the ratio threshold — it controls the trade-off between coverage (more types) and specificity (fewer FPs).
+- `relaxed_30` should become the new default feature selection method.
+
+**Commit:** 37916de

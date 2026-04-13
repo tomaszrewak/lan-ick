@@ -34,6 +34,9 @@ Completed: 6 binary LRs trained. Spelling (92% det, 8% FP) and extra_word (91% d
 ### ~~Per-type feature sets for OVR classifiers~~ ✓ Done (Experiment 6)
 Completed: Each type gets its own features. extra_word hit 0% FP (perfect), spelling 100% type accuracy. grammar and missing_word have ZERO features at 16k — not separable. word_choice and word_order each have 1 feature. FP down 61%. Combined F1=68.6% (lower recall since 2 types dropped entirely).
 
+### ~~Feature selection method comparison~~ ✓ Done (Experiment 7)
+Completed: Compared 8 methods (baseline, relaxed, paired_token_diff, magnitude_diff, ttest, top_k_error). **relaxed_30** (min_pair_ratio=0.3) wins with F1=78.0%, unlocking grammar detection (18 features, 75% det, 9% FP). Token-comparison methods (paired_diff, ttest) find grammar but with unacceptable FP. Fixed-K methods (magnitude_diff, top_k_error) are fundamentally unsuitable — destroy spelling detection. The simple binary presence approach with a lower threshold is the best paradigm.
+
 ### FP-constrained threshold selection
 **Goal:** Instead of optimizing F1 per type (which picks low thresholds for weak classifiers), set a max FP budget per type (e.g., 5%) and find the highest detection rate within that budget. This would let us ship only the types that are reliably separable (spelling, extra_word) and suppress the rest.
 **Importance:** Medium — less urgent now that per-type features naturally suppress weak types (grammar/missing_word get 0 features).
