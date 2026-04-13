@@ -20,12 +20,11 @@ Completed: Pushed to 0.95 — F1=94.2%, P=91.2%, R=97.3%. Dominant FP source: `n
 ### ~~Word order swap and similar-word replacement errors~~ ✓ Done (Experiment 4)
 Completed as part of full 6-type expansion. Word order detected 82%, word choice 82%, but type classification accuracy lower (44%, 67%). Grammar detected 90% but misclassified 78% of the time.
 
-### Smarter synthetic data generation
-**Goal:** Current corruption functions are naive — e.g., `corrupt_missing_word` randomly deletes any word, but deleting an adjective ("the big dog" → "the dog") is grammatically valid and undetectable. Invest in linguistically-aware generation: delete function words (articles, prepositions, auxiliaries) rather than content words; for grammar errors, target known agreement patterns (subject-verb, determiner-noun); for word choice, ensure the context makes the substitution clearly wrong. Better training data = better classifier, regardless of architecture.
-**Importance:** Very high — garbage in, garbage out. Low detection on some types may partly be a data quality issue.
+### ~~Smarter synthetic data generation~~ ✓ Done (Experiment 12)
+Completed: POS-based word order swaps (det→55%), function-word-only deletion for missing_word (22%→28%), expanded CONFUSABLES (~70 entries), expanded GRAMMAR_SWAPS (verb tense + pronoun case), added vowel substitution and double-letter drop for spelling. Overall F1 78%→81.5%, FP rate 29.3%→24.0%. Clear win.
 
-### Scale up multi-class training data
-**Goal:** Exp 4 has only 50 pairs/type → 37 training pairs/type → tiny error token counts (grammar: 39 tokens, extra_word: 43). Scale to 150+ pairs per type (900+ total) to give the multi-class LR enough signal, especially for grammar and missing_word.
+### ~~Scale up multi-class training data~~ ✓ Done (Experiment 12)
+Completed: Scaled from 300 to 600 pairs (100 per type). Training tokens roughly doubled. Combined with smarter corruption for a +3.5% F1 improvement.
 **Importance:** Very high — data starvation is the likely cause of Exp 4's poor type classification.
 
 ### ~~One-vs-rest binary classifiers per error type~~ ✓ Done (Experiment 5)

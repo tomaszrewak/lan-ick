@@ -474,4 +474,70 @@ Training token counts: clean tokens dropped from all tokens to ~1 per word (last
 
 **Conclusion:** Win. Filtering both training and prediction to last-word tokens reduces FP further by eliminating noisy intermediate-token activations. Spelling FP improvement is the most dramatic (8%→2.7%). The model's internal back-and-forth while processing multi-token words ("maybe error... no wait... yes error") was indeed adding noise at prediction time. This change should be permanent.
 
-**Commit:** 82289ba
+**Commit:** 25f297c
+
+---
+
+## Experiment 12: Smarter synthetic data generation
+
+**Date:** 2026-04-13T22:00:00+02:00
+
+**Goal:** Improve data quality across all 6 error types and scale up to 600 pairs. Current weak types (word_order 36%, missing_word 22%, word_choice 64%) suffer from ambiguous training examples — random word swaps that produce valid text, random deletions that leave valid text, and a small confusables dictionary. Fix each type's generation to produce unambiguously wrong text, and add more corruption variety for spelling.
+
+**Changes:**
+1. **Word order**: Use NLTK POS tags to only swap adjacent words where the result is obviously wrong (JJ+NN→NN+JJ, DT+NN→NN+DT, IN+NN→NN+IN). Eliminates ambiguous swaps.
+2. **Missing word**: Only delete function words (articles, prepositions, auxiliaries) — these create syntactic breakage. Content word deletion often yields valid text.
+3. **Word choice**: Expand CONFUSABLES from ~38 to ~70+ entries (more homophones: would/wood, flour/flower, plain/plane, etc.).
+4. **Grammar**: Expand GRAMMAR_SWAPS with verb tense errors (go/went, see/saw, etc.) and pronoun case errors (I/me, he/him). Remove ambiguous a/an swap.
+5. **Spelling**: Add vowel substitution and double-letter dropping patterns.
+6. **Scale**: 300→600 pairs (100 per type).
+
+**Hypothesis:** Cleaner training examples (especially for word_order and missing_word) should improve detection rates. More diverse spelling/grammar patterns should improve generalization. Larger dataset gives more stable classifiers. Expect: word_order det >50%, missing_word det >40%, word_choice det >75%, with FP rates holding or improving.
+
+**Parameters:**
+- 600 pairs, 100 per type, 75/25 split, seed=42
+- Same layers: [7, 13, 17, 22], width 16k
+- Same feature selection: per-type, min_pair_ratio=0.3
+- Same classifier: OVR LR, last-token-only training and prediction
+- Thresholds: [0.5, 0.8, 0.9, 0.95]
+- DATA_VERSION="v5", EXTRACT_VERSION="v2" (new data, forces re-extraction)
+
+**Results:**
+
+| threshold | F1    | Precision | Recall | FP#  |
+|-----------|-------|-----------|--------|------|
+| 0.5       | 72.9% | 58.8%     | 96.0%  | 101  |
+| 0.8       | 79.5% | 72.5%     | 88.0%  | 50   |
+| 0.9       | 81.5% | 78.0%     | 85.3%  | 36   |
+| 0.95      | 81.5% | 80.9%     | 82.0%  | 29   |
+
+Per-type detection at t=0.9 (vs Exp 11, noting test set is 150 vs 75):
+
+| Type | Det (Exp 11) | Det (Exp 12) | FP (Exp 11) | FP (Exp 12) |
+|------|-------------|-------------|-------------|-------------|
+| spelling | 100% | 93% | 2.7% | 5.3% |
+| word_choice | 64% | 59% | 8.0% | 6.7% |
+| grammar | 90% | 81% | 12.0% | 9.3% |
+| word_order | 36% | **55%** | 8.0% | 7.3% |
+| missing_word | 22% | **28%** | 5.3% | 6.0% |
+| extra_word | 91% | **96%** | 0.0% | 0.0% |
+
+Feature counts: spelling=63, grammar=27, word_choice=17, word_order=15, extra_word=14, missing_word=1.
+Training tokens: spelling=118, word_choice=89, grammar=91, word_order=156, missing_word=75, extra_word=75.
+
+Comparison at t=0.9 (vs Exp 11): F1 78.0%→81.5%, P 73.8%→78.0%, R 82.7%→85.3%.
+FP rate: Exp 11 had 22/75=29.3% of clean sentences flagged; Exp 12 has 36/150=24.0% — actually lower.
+Comparison at t=0.95: F1 76.4%→81.5%, P 79.7%→80.9% — strong improvement.
+
+**Observations:**
+- **word_order** detection jumped 36%→55% — POS-based swapping produces clearly wrong examples that the model can learn from. Still room to improve.
+- **missing_word** only marginally improved (22%→28%) and still has just 1 feature. Function-word deletion is a better signal but the SAE may not encode "something is missing" well at 16k.
+- **grammar** detection dropped 90%→81% — possibly because the expanded GRAMMAR_SWAPS (verb tense, pronoun case) are harder patterns than the narrow is/are/was/were. More diverse errors require more diverse features.
+- **spelling** detection dropped 100%→93% — the two new corruption methods (vowel substitution, double-letter drop) may produce subtler errors that are harder to detect. Still very strong.
+- **word_choice** FP improved (8%→6.7%) with the expanded confusables dictionary.
+- **extra_word** improved to 96% detection at 0% FP — consistently the best type.
+- Overall: F1 improved +3.5%, precision improved +4.2%, recall improved +2.6%. Clear win from better data.
+
+**Conclusion:** Smarter data generation is a clear win. The POS-based word order swaps are the biggest per-type improvement. The broader corruption patterns trade some detection on individual types (spelling 100%→93%, grammar 90%→81%) for better generalization and lower overall FP rate (29.3%→24.0%). The classifier is now more robust. This should be the new baseline.
+
+**Commit:** 7f45b8f

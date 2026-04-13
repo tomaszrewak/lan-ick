@@ -18,7 +18,7 @@ from src.classifier import (
 # --------------- Parameters ---------------
 
 LAYERS = [7, 13, 17, 22]
-N_PAIRS = 300
+N_PAIRS = 600
 MIN_WORDS = 8
 MAX_WORDS = 20
 DATA_SEED = 42
@@ -26,7 +26,7 @@ TRAIN_RATIO = 0.75
 SPLIT_SEED = 42
 MIN_PAIR_RATIO = 0.3
 
-DATA_VERSION = "v4"
+DATA_VERSION = "v5"
 EXTRACT_VERSION = "v2"
 EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w16k"
 

@@ -4,6 +4,7 @@ import random
 from dataclasses import dataclass, field
 from enum import Enum
 
+import nltk
 from datasets import load_dataset
 
 
@@ -69,7 +70,39 @@ def _insert_char(word: str, rng: random.Random) -> str:
     return word[:pos + 1] + inserted + word[pos + 1:]
 
 
-_SPELLING_FUNCS = [_swap_adjacent_chars, _delete_char, _insert_char]
+def _drop_double_letter(word: str, rng: random.Random) -> str:
+    """Drop one letter from a double (e.g., 'committee' → 'comittee')."""
+    for i in range(len(word) - 1):
+        if word[i].lower() == word[i + 1].lower():
+            return word[:i] + word[i + 1:]
+    return word  # no doubles found, return unchanged
+
+
+def _substitute_vowel(word: str, rng: random.Random) -> str:
+    """Swap one vowel for a nearby vowel (a↔e, e↔i, i↔o, o↔u)."""
+    vowels = 'aeiou'
+    vowel_positions = [i for i, c in enumerate(word) if c.lower() in vowels and i > 0]
+    if not vowel_positions:
+        return word
+    pos = rng.choice(vowel_positions)
+    c = word[pos].lower()
+    idx = vowels.index(c)
+    # Pick an adjacent vowel
+    candidates = []
+    if idx > 0:
+        candidates.append(vowels[idx - 1])
+    if idx < len(vowels) - 1:
+        candidates.append(vowels[idx + 1])
+    replacement = rng.choice(candidates)
+    if word[pos].isupper():
+        replacement = replacement.upper()
+    return word[:pos] + replacement + word[pos + 1:]
+
+
+_SPELLING_FUNCS = [
+    _swap_adjacent_chars, _delete_char, _insert_char,
+    _drop_double_letter, _substitute_vowel,
+]
 
 
 def corrupt_spelling(sentence, rng, min_errors=1, max_errors=3):
@@ -129,6 +162,39 @@ CONFUSABLES = {
     "brake": ["break"], "break": ["brake"],
     "advice": ["advise"], "advise": ["advice"],
     "principal": ["principle"], "principle": ["principal"],
+    # Additional homophones and commonly confused words
+    "would": ["wood"], "wood": ["would"],
+    "flour": ["flower"], "flower": ["flour"],
+    "plain": ["plane"], "plane": ["plain"],
+    "tale": ["tail"], "tail": ["tale"],
+    "wait": ["weight"], "weight": ["wait"],
+    "rain": ["reign"], "reign": ["rain"],
+    "sight": ["site"], "site": ["sight"],
+    "steel": ["steal"], "steal": ["steel"],
+    "board": ["bored"], "bored": ["board"],
+    "die": ["dye"], "dye": ["die"],
+    "course": ["coarse"], "coarse": ["course"],
+    "pray": ["prey"], "prey": ["pray"],
+    "waste": ["waist"], "waist": ["waste"],
+    "morning": ["mourning"], "mourning": ["morning"],
+    "been": ["bean"], "bean": ["been"],
+    "night": ["knight"], "knight": ["night"],
+    "son": ["sun"], "sun": ["son"],
+    "grown": ["groan"], "groan": ["grown"],
+    "road": ["rode"], "rode": ["road"],
+    "pair": ["pear"], "pear": ["pair"],
+    "root": ["route"], "route": ["root"],
+    "ceiling": ["sealing"], "sealing": ["ceiling"],
+    "medal": ["meddle"], "meddle": ["medal"],
+    "desert": ["dessert"], "dessert": ["desert"],
+    "lay": ["lie"], "lie": ["lay"],
+    "who": ["whom"], "whom": ["who"],
+    "less": ["fewer"], "fewer": ["less"],
+    "further": ["farther"], "farther": ["further"],
+    "beside": ["besides"], "besides": ["beside"],
+    "later": ["latter"], "latter": ["later"],
+    "personal": ["personnel"], "personnel": ["personal"],
+    "aloud": ["allowed"], "allowed": ["aloud"],
 }
 
 
@@ -163,13 +229,39 @@ def corrupt_word_choice(sentence, rng):
 # --------------- Grammar errors ---------------
 
 GRAMMAR_SWAPS = {
+    # Agreement errors
     "is": "are", "are": "is",
     "was": "were", "were": "was",
     "has": "have", "have": "has",
     "does": "do", "do": "does",
     "this": "these", "these": "this",
     "that": "those", "those": "that",
-    "a": "an", "an": "a",
+    # Verb tense errors
+    "go": "went", "went": "go",
+    "come": "came", "came": "come",
+    "take": "took", "took": "take",
+    "give": "gave", "gave": "give",
+    "see": "saw", "saw": "see",
+    "run": "ran", "ran": "run",
+    "eat": "ate", "ate": "eat",
+    "think": "thought", "thought": "think",
+    "make": "made", "made": "make",
+    "say": "said", "said": "say",
+    "get": "got", "got": "get",
+    "know": "knew", "knew": "know",
+    "find": "found", "found": "find",
+    "tell": "told", "told": "tell",
+    "keep": "kept", "kept": "keep",
+    "begin": "began", "began": "begin",
+    "feel": "felt", "felt": "feel",
+    "leave": "left", "left": "leave",
+    "bring": "brought", "brought": "bring",
+    # Pronoun case errors
+    "I": "me", "me": "I",
+    "he": "him", "him": "he",
+    "she": "her", "her": "she",
+    "we": "us", "us": "we",
+    "they": "them", "them": "they",
 }
 
 
@@ -203,13 +295,34 @@ def corrupt_grammar(sentence, rng):
 
 # --------------- Word order errors ---------------
 
+# POS tag pairs where swapping produces obviously wrong word order.
+# (tag_i, tag_i+1) → swap is guaranteed wrong.
+_BAD_SWAP_PATTERNS = {
+    # Adjective before noun → noun before adjective
+    ("JJ", "NN"), ("JJ", "NNS"), ("JJ", "NNP"),
+    # Determiner before noun/adj → noun/adj before determiner
+    ("DT", "NN"), ("DT", "NNS"), ("DT", "JJ"), ("DT", "NNP"),
+    # Preposition before determiner/noun → determiner/noun before preposition
+    ("IN", "DT"), ("IN", "NN"), ("IN", "NNS"), ("IN", "NNP"),
+    # Verb before determiner/noun → determiner/noun before verb
+    ("VB", "DT"), ("VBD", "DT"), ("VBZ", "DT"), ("VBP", "DT"),
+    ("VB", "NN"), ("VBD", "NN"), ("VBZ", "NN"), ("VBP", "NN"),
+}
+
+
 def corrupt_word_order(sentence, rng):
-    """Swap two adjacent words. Returns (text, labels) or None."""
+    """Swap two adjacent words where POS tags guarantee the result is wrong."""
     words = sentence.split()
     if len(words) < 4:
         return None
-    eligible = [i for i in range(1, len(words) - 2)
-                if len(words[i]) >= 2 and len(words[i + 1]) >= 2]
+    # Strip punctuation for POS tagging
+    clean_words = [w.rstrip(".,!?;:") for w in words]
+    tags = nltk.pos_tag(clean_words)
+    eligible = []
+    for i in range(1, len(words) - 1):
+        tag_pair = (tags[i][1], tags[i + 1][1])
+        if tag_pair in _BAD_SWAP_PATTERNS:
+            eligible.append(i)
     if not eligible:
         return None
     idx = rng.choice(eligible)
@@ -220,12 +333,34 @@ def corrupt_word_order(sentence, rng):
 
 # --------------- Missing word errors ---------------
 
+# Function words whose deletion creates syntactic breakage
+_DELETABLE_FUNCTION_WORDS = {
+    # Articles
+    "a", "an", "the",
+    # Prepositions
+    "in", "on", "at", "of", "for", "to", "with", "by", "from", "about",
+    "into", "through", "during", "before", "after", "between", "under",
+    "over", "around", "against", "among", "without", "within",
+    # Auxiliaries
+    "is", "are", "was", "were", "has", "have", "had",
+    "do", "does", "did", "will", "would", "can", "could",
+    "should", "shall", "may", "might", "must",
+    # Conjunctions
+    "and", "but", "or", "so", "yet",
+    # Pronouns (subject)
+    "it", "he", "she", "we", "they",
+}
+
+
 def corrupt_missing_word(sentence, rng):
-    """Delete a word from the sentence. Returns (text, labels) or None."""
+    """Delete a function word from the sentence. Returns (text, labels) or None."""
     words = sentence.split()
     if len(words) < 6:
         return None
-    eligible = [i for i in range(1, len(words) - 1) if len(words[i]) >= 2]
+    eligible = [
+        i for i in range(1, len(words) - 1)
+        if words[i].lower().rstrip(".,!?;:") in _DELETABLE_FUNCTION_WORDS
+    ]
     if not eligible:
         return None
     idx = rng.choice(eligible)
