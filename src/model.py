@@ -7,8 +7,7 @@ from sae_lens import SAE
 # --------------- Configuration ---------------
 
 MODEL_NAME = "google/gemma-3-1b-pt"
-SAE_RELEASE_ALL = "gemma-scope-2-1b-pt-res-all"    # every layer, widths: 16k, 262k
-SAE_RELEASE_SUBSET = "gemma-scope-2-1b-pt-res"      # layers 7,13,17,22, widths: 16k,65k,262k,1M
+SAE_RELEASE = "gemma-scope-2-1b-pt-res-all"    # all layers, width 16k
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Gemma 3 1B: 26 layers (0-25), hidden_size=1152
@@ -44,39 +43,21 @@ def load_model(device: str = DEVICE):
 
 # --------------- SAE loading ---------------
 
-_sae_cache: dict[str, SAE] = {}
+_sae_cache: dict[int, SAE] = {}
 
 
-def clear_sae_cache():
-    """Evict all cached SAEs to free VRAM."""
-    for sae in _sae_cache.values():
-        del sae
-    _sae_cache.clear()
-    import gc
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+def load_sae(layer: int, device: str = DEVICE) -> SAE:
+    """Load a GemmaScope 2 16k SAE for a given layer. Cached after first call."""
+    if layer in _sae_cache:
+        return _sae_cache[layer]
 
-
-def load_sae(layer: int, width: str = "16k", device: str = DEVICE) -> SAE:
-    """Load a GemmaScope 2 SAE for a given layer. Cached after first call."""
-    key = f"{layer}-{width}"
-    if key in _sae_cache:
-        return _sae_cache[key]
-
-    # Use the all-layers release for 16k/262k, subset release for 65k/1M
-    if width in ("16k", "262k"):
-        release = SAE_RELEASE_ALL
-    else:
-        release = SAE_RELEASE_SUBSET
-
-    print(f"Loading SAE: layer {layer}, width {width}...")
+    print(f"Loading SAE: layer {layer}...")
     sae = SAE.from_pretrained(
-        release=release,
-        sae_id=f"layer_{layer}_width_{width}_l0_small",
+        release=SAE_RELEASE,
+        sae_id=f"layer_{layer}_width_16k_l0_small",
         device=device,
     )
-    _sae_cache[key] = sae
+    _sae_cache[layer] = sae
     print(f"SAE loaded: {sae.cfg.d_sae} features")
     return sae
 
@@ -105,24 +86,23 @@ def get_hidden_states(inputs, device: str = DEVICE) -> tuple:
     return outputs.hidden_states
 
 
-def encode_with_sae(hidden_state: torch.Tensor, layer: int, width: str = "16k") -> torch.Tensor:
+def encode_with_sae(hidden_state: torch.Tensor, layer: int) -> torch.Tensor:
     """Encode a hidden state through an SAE.
 
     Args:
         hidden_state: (1, seq_len, hidden_size) or (seq_len, hidden_size)
         layer: Which layer's SAE to use.
-        width: SAE width.
 
     Returns:
         (seq_len, d_sae) tensor of feature activations.
     """
-    sae = load_sae(layer, width)
+    sae = load_sae(layer)
     if hidden_state.dim() == 3:
         hidden_state = hidden_state.squeeze(0)
     return sae.encode(hidden_state.float())
 
 
-def extract_text_features(text: str, layers: list[int], width: str = "16k") -> dict:
+def extract_text_features(text: str, layers: list[int]) -> dict:
     """Extract SAE features for a text across specified layers.
 
     Returns:
@@ -133,7 +113,7 @@ def extract_text_features(text: str, layers: list[int], width: str = "16k") -> d
 
     features = {}
     for layer in layers:
-        sae_acts = encode_with_sae(hidden_states[layer + 1], layer, width)
+        sae_acts = encode_with_sae(hidden_states[layer + 1], layer)
         layer_feats: dict[int, list[tuple[int, float, str]]] = {}
         nonzero = sae_acts.nonzero()
         for pos, feat_idx in nonzero:

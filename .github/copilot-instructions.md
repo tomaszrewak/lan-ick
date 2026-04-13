@@ -47,6 +47,8 @@ Every experiment MUST follow this protocol:
 
 6. **Commit**: Stage and commit all source changes. The commit message should reference the experiment title. After committing, go back and add the commit hash to the log entry, then amend the commit.
 
+7. **Cleanup**: Remove experiment-specific complexity from `src/` and `experiments/run.py` that isn't justified by results. If the experiment failed or the gains were marginal, revert `src/` changes and simplify `run.py` back to the best known pipeline. Each experiment is preserved as a git commit, so nothing is lost. Commit the cleanup separately so the codebase at HEAD reflects the best known approach, not accumulated scaffolding from past experiments.
+
 ### Experiment Code Style
 
 `experiments/run.py` should read **top-to-bottom** like a script: load data → set up model → run analysis → print/save results. It should compose building blocks from `src/` rather than implementing low-level logic. Keep it easy to scan and understand at a glance — someone reading the experiment should see the "what" without getting lost in the "how".
