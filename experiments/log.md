@@ -354,3 +354,49 @@ Feature counts per type:
 - **Conclusion:** The marginal gains do not justify 16x wider SAEs and dramatically slower inference. Stick with 16k for now. The bottleneck is not feature granularity — it's data quality and inherent difficulty of types like missing_word.
 
 **Commit:** d3c60a5
+
+---
+
+## Experiment 9: Last-token-only labeling for causal attention
+
+**Date:** 2026-04-13T20:30:00+02:00
+
+**Goal:** Fix a training label mismatch caused by causal attention. Currently, all tokens of an error word get error labels during training. But Gemma uses causal attention — earlier tokens of a multi-token word can't "see" future tokens, so their activations may not reflect the error. This injects noise: non-last tokens get error labels despite having no error signal in their activations.
+
+**Hypothesis:** Labeling only the last token of each error word (which has seen all preceding tokens of the word) and excluding non-last tokens from training should: (1) reduce false positives by removing noisy positive examples, (2) maintain or improve detection since the strongest signal is at the last token. Feature selection (pair-level, comparing error vs clean text features) is unaffected — only the token-level classifier training changes.
+
+**Parameters:**
+- Same data: 300 pairs, 75/25 split, seed=42
+- Same layers: [7, 13, 17, 22], width 16k
+- Same feature selection: per-type, min_pair_ratio=0.3
+- Change: in `train_ovr`, error-word tokens except the last are excluded from training
+- Prediction unchanged: max P(error) across all tokens
+- Thresholds: [0.5, 0.8, 0.9, 0.95]
+
+**Results:**
+
+At threshold=0.9 (vs Exp 7 baseline):
+
+| Type | Detection | FP | Detection (before) | FP (before) |
+|------|-----------|------|---------------------|-------------|
+| spelling | 100% | **8.0%** | 100% | 24.0% |
+| word_choice | 64% | 12.0% | 64% | 13.3% |
+| grammar | 90% | 12.0% | 90% | 12.0% |
+| word_order | 45% | 13.3% | 36% | 8.0% |
+| missing_word | 33% | 8.0% | 11% | 4.0% |
+| extra_word | 100% | 1.3% | 91% | 1.3% |
+| **Combined** | **F1=77.3%** | **25 FPs** | F1=75.4% | 34 FPs |
+
+At threshold=0.95: F1=76.0%, P=76.0%, R=76.0%, FP#=18 (was F1=73.4%, P=69.9%, FP#=25)
+
+Training token counts: spelling dropped from 171→76 positive tokens (removed ~95 non-last tokens of multi-token misspelled words).
+
+**Observations:**
+- **Spelling FP collapsed from 24% to 8%** — the biggest single improvement. Non-last tokens of misspelled words were indeed injecting noise.
+- Detection rates held or improved: spelling 100%, grammar 90%, extra_word 100%→100%.
+- word_order and missing_word detection improved (36%→45%, 11%→33%) though their FP also increased slightly.
+- **FP count at t=0.9 dropped 26%** (34→25) and **at t=0.95 dropped 28%** (25→18).
+- **Precision at t=0.95 jumped from 69.9% to 76.0%** — first time above 75%.
+- **Conclusion:** Clear win. The causal attention insight is correct — labeling non-last tokens as errors was adding noise. This change should be permanent.
+
+**Commit:** 201630c

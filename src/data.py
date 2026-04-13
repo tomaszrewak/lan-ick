@@ -373,6 +373,19 @@ def token_to_word_index(text: str, str_tokens: list[str]) -> list[int | None]:
     return result
 
 
+def last_token_positions(word_map: list[int | None]) -> dict[int, int]:
+    """Find the last token position for each word index.
+
+    Given a word_map from token_to_word_index(), returns {word_idx: last_token_pos}.
+    For causal models, the last token is the one with full word context.
+    """
+    last: dict[int, int] = {}
+    for pos, word_idx in enumerate(word_map):
+        if word_idx is not None:
+            last[word_idx] = pos  # overwrites, so final value is the last position
+    return last
+
+
 def split_train_test(
     pairs: list[TextPair], train_ratio: float = 0.75, seed: int = 42
 ) -> tuple[list[int], list[int]]:

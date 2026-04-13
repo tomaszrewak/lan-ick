@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
-from src.data import ErrorType, TextPair, token_to_word_index
+from src.data import ErrorType, TextPair, token_to_word_index, last_token_positions
 
 
 # --------------- Label mapping ---------------
@@ -183,18 +183,25 @@ def train(
     y_rows = []
 
     for pf, pair in zip(train_pair_features, train_pairs):
-        # Error text: label tokens by their error type
+        # Error text: label only last token of each error word, skip non-last tokens
         error_feats = pf["error"]
         error_tokens = error_feats["tokens"]
         word_map = token_to_word_index(pair.error, error_tokens)
+        last_tok = last_token_positions(word_map)
 
         for pos in range(len(error_tokens)):
-            vec = _token_activation_vector(error_feats, pos, feature_index)
             word_idx = word_map[pos]
             if word_idx is not None and word_idx in pair.error_word_labels:
-                label = ERROR_TYPE_TO_LABEL[pair.error_word_labels[word_idx]]
+                # This token belongs to an error word
+                if pos == last_tok[word_idx]:
+                    # Last token of error word: has full causal context, label it
+                    label = ERROR_TYPE_TO_LABEL[pair.error_word_labels[word_idx]]
+                else:
+                    # Non-last token of error word: skip (causal attention can't see ahead)
+                    continue
             else:
                 label = LABEL_CLEAN
+            vec = _token_activation_vector(error_feats, pos, feature_index)
             X_rows.append(vec)
             y_rows.append(label)
 
@@ -361,13 +368,20 @@ def train_ovr(
             error_feats = pf["error"]
             error_tokens = error_feats["tokens"]
             word_map = token_to_word_index(pair.error, error_tokens)
+            last_tok = last_token_positions(word_map)
             for pos in range(len(error_tokens)):
-                vec = _token_activation_vector(error_feats, pos, feat_index)
                 word_idx = word_map[pos]
                 if word_idx is not None and word_idx in pair.error_word_labels:
-                    is_this_type = pair.error_word_labels[word_idx] == et
+                    # This token belongs to an error word
+                    if pos == last_tok[word_idx]:
+                        # Last token: label it
+                        is_this_type = pair.error_word_labels[word_idx] == et
+                    else:
+                        # Non-last token of error word: skip
+                        continue
                 else:
                     is_this_type = False
+                vec = _token_activation_vector(error_feats, pos, feat_index)
                 X.append(vec)
                 y.append(1 if is_this_type else 0)
 

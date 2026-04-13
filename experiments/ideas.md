@@ -48,6 +48,10 @@ Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 F
 **Goal:** Check if restricting to layers 5, 10, 13 (29 features) still matches the full 5-layer result (41 features). Layers 17 and 22 contribute only 13 features and the signal tapers off there. If performance holds, the fused model can be truncated at layer 13 instead of 22 — roughly halving the LLM portion and making classification significantly faster.
 **Importance:** High — directly determines how much of the model we can strip for the fused deployment.
 
+### Word-level prediction aggregation
+**Goal:** Instead of max-across-all-tokens for sentence-level scoring, aggregate per-word (max or mean of the word's tokens). This gives word-level error highlighting — more useful for a real UI. The last-token-only training (Exp 9) makes this natural since signal concentrates at word boundaries.
+**Importance:** Medium — needed for production UX, but sentence-level detection is sufficient for experiments.
+
 ### Layer sweep across all 26 layers
 **Goal:** Map exactly where error-detection signal emerges and peaks. Current experiment samples 5 layers; a full sweep would reveal the optimal layer(s) to use for the final classifier.
 **Importance:** High — needed to decide which layer(s) to bake into the fused model.
