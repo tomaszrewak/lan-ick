@@ -541,3 +541,81 @@ Comparison at t=0.95: F1 76.4%→81.5%, P 79.7%→80.9% — strong improvement.
 **Conclusion:** Smarter data generation is a clear win. The POS-based word order swaps are the biggest per-type improvement. The broader corruption patterns trade some detection on individual types (spelling 100%→93%, grammar 90%→81%) for better generalization and lower overall FP rate (29.3%→24.0%). The classifier is now more robust. This should be the new baseline.
 
 **Commit:** 7f45b8f
+
+---
+
+## Experiment 13: Position-aware top-N feature selection + per-type thresholds
+
+**Date:** 2026-04-13T23:00:00+02:00
+
+**Goal:** Two changes to the feature selection and evaluation pipeline:
+
+1. **Position-aware selection**: Current selection checks if a feature fires *anywhere* in error text but not in clean text. With a 12-word sentence and 1 error word, ~11/12 of firing positions are non-error words — features at those positions are noise. Fix: only count features that fire at the **last token of error words** in error text, then subtract features firing anywhere in clean text.
+
+2. **Top-N ranking (replace min_pair_ratio)**: The 30% cutoff discards features that appear in only 25% of pairs. But four 25% features covering different subsets could combine to 100% detection. Replace the hard cutoff with: rank by pair count, take top N per type, let the LR classifier learn which are meaningful. Sweep N ∈ [25, 50, 100].
+
+3. **Per-type thresholds**: Instead of one global threshold, find each type's threshold to keep FP ≤ 5%. Types that can't meet the budget get disabled. This should improve combined precision significantly.
+
+**Hypothesis:** Position-aware selection eliminates ~90% of noise in feature selection. Top-N lets complementary low-frequency features through. Per-type thresholds let strong types (spelling, extra_word) run at aggressive thresholds while suppressing noisy types. Expect: significant FP reduction, improved precision, potentially some detection improvement for weak types.
+
+**Parameters:**
+- Same data: 600 pairs, 100/type, 75/25 split, seed=42
+- Same layers: [7, 13, 17, 22], width 16k
+- Same classifier: OVR LR, last-token-only training and prediction
+- New: position-aware feature selection, top-N sweep [25, 50, 100]
+- New: per-type threshold evaluation with 5% FP budget
+- Global thresholds: [0.5, 0.8, 0.9, 0.95] for comparison with Exp 12
+
+**Results:**
+
+Best config per N (per-type thresholds with FP ≤ 5% budget):
+
+| N   | F1    | Precision | Recall | FP#  |
+|-----|-------|-----------|--------|------|
+| 25  | 80.7% | 80.7%     | 80.7%  | 29   |
+| 50  | 81.6% | 83.3%     | 80.0%  | 24   |
+| 100 | 70.7% | 82.3%     | 62.0%  | 20   |
+
+N=50 per-type breakdown (FP ≤ 5%):
+
+| Type         | Thresh | Det  | FP   |
+|--------------|--------|------|------|
+| spelling     | 0.93   | 90%  | 4.7% |
+| word_choice  | 0.93   | 55%  | 2.0% |
+| grammar      | 0.99   | 74%  | 4.7% |
+| word_order   | 0.96   | 64%  | 4.7% |
+| missing_word | 1.00   | 0%   | 0.0% |
+| extra_word   | 0.50   | 100% | 0.7% |
+
+N=50 at global thresholds (for comparison with Exp 12):
+
+| Threshold | F1    | Precision | Recall | FP#  |
+|-----------|-------|-----------|--------|------|
+| 0.5       | 68.3% | 52.1%     | 99.3%  | 137  |
+| 0.8       | 76.3% | 63.6%     | 95.3%  | 82   |
+| 0.9       | 78.8% | 68.5%     | 92.7%  | 64   |
+| 0.95      | 79.6% | 73.2%     | 87.3%  | 48   |
+
+Candidate pool sizes: spelling 979, word_choice 701, word_order 688, grammar 458, extra_word 397, missing_word 240.
+
+Feature distribution for N=50: spelling L7:17/L13:16/L17:11/L22:6, word_choice L7:17/L13:14/L17:11/L22:8, grammar L7:9/L13:9/L17:16/L22:16, word_order L7:13/L13:19/L17:9/L22:9, missing_word L7:16/L13:17/L17:10/L22:7, extra_word L7:24/L13:13/L17:10/L22:3.
+
+**Observations:**
+- **Position-aware selection works**: Candidate pools are large (240–979 per type), confirming that many features fire specifically at error word positions. The selection filters out features that also fire in clean text.
+- **N=50 is the sweet spot**: Best F1 (81.6%) and precision (83.3%). N=25 has slightly less precision; N=100 overfits badly (word_order and missing_word collapse to 0% detection when constrained to FP ≤ 5%).
+- **Per-type thresholds are a big win**: N=50 per-type (F1=81.6%, P=83.3%, FP#=24) vs N=50 at global t=0.95 (F1=79.6%, P=73.2%, FP#=48) — per-type halves the false positives while improving F1.
+- **vs Exp 12 baseline** (t=0.95: F1=81.5%, P=80.9%, FP#=22): N=50 per-type is comparable — slightly better F1 (81.6 vs 81.5), better precision (83.3 vs 80.9), but slightly more FP (24 vs 22). At global t=0.95, Exp 13 is worse (F1=79.6 vs 81.5), meaning the per-type thresholds are what recover the performance.
+- **spelling improved**: 90% at 4.7% FP (was 93% at Exp 12 t=0.95, but that had higher FP). Per-type threshold lets it find the right operating point.
+- **word_order improved significantly**: 64% detection at 4.7% FP (was 55% in Exp 12). Position-aware selection and per-type threshold both help.
+- **grammar needs very high threshold**: t=0.99 for 74% detection at 4.7% FP — the model is uncertain about grammar errors.
+- **missing_word remains unsolvable**: Needs t=1.00, yielding 0% detection. The SAE features don't encode "something is missing" at 16k width.
+- **N=100 overfits**: With 100 features but only 75–156 positive tokens per type, the LR can't separate signal from noise. FP rates are much higher at every threshold, requiring extreme thresholds that kill detection.
+
+**Conclusions:**
+- The per-type threshold mechanism is the clear winner of this experiment — it's a general improvement independent of feature selection method.
+- Position-aware top-N selection at N=50 is roughly on par with the old min_pair_ratio=0.3 approach. The hypothesis that top-N would let complementary features through was partially validated (word_order +9%), but overall F1 is similar.
+- N=50 with per-type thresholds should become the new approach, as it gives better precision at similar F1 with more principled FP control.
+- Missing_word should be dropped or treated as a "bonus" type — don't let its poor performance drag down the pipeline.
+- The non-linear classifier idea (Random Forest) may not be needed since N=50 doesn't show the "too many features for linear separation" problem — that only appears at N=100.
+
+**Commit:** 20ada16

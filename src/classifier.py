@@ -111,6 +111,82 @@ def select_features_per_type(
     return per_type
 
 
+def select_features_position_aware_topn(
+    pair_features: list[dict],
+    layers: list[int],
+    train_pairs: list[TextPair],
+    top_n: int = 50,
+    min_count: int = 2,
+) -> dict[ErrorType, dict[int, set[int]]]:
+    """Select top-N features per type using position-aware selection.
+
+    Only counts features that fire at error word last-token positions in
+    error text and NOT anywhere in clean text. Ranks by pair count and
+    takes top N globally (across layers) per type.
+    """
+    type_indices: dict[ErrorType, list[int]] = {}
+    for i, pair in enumerate(train_pairs):
+        type_indices.setdefault(pair.error_type, []).append(i)
+
+    per_type: dict[ErrorType, dict[int, set[int]]] = {}
+
+    for et, indices in type_indices.items():
+        # Count (layer, fid) appearances across pairs
+        counter: Counter[tuple[int, int]] = Counter()
+
+        for idx in indices:
+            pf = pair_features[idx]
+            pair = train_pairs[idx]
+            error_feats = pf["error"]
+            error_tokens = error_feats["tokens"]
+
+            # Get last token positions for error words
+            word_map = token_to_word_index(pair.error, error_tokens)
+            last_tok = last_token_positions(word_map)
+            error_positions = {
+                last_tok[w] for w in pair.error_word_labels if w in last_tok
+            }
+            if not error_positions:
+                continue
+
+            # Clean: all fids that fire anywhere
+            clean_fids_by_layer: dict[int, set[int]] = {}
+            for layer in layers:
+                clean_fids_by_layer[layer] = set(
+                    pf["clean"]["features"].get(layer, {}).keys()
+                )
+
+            # Error: only fids at error word positions
+            for layer in layers:
+                clean_fids = clean_fids_by_layer[layer]
+                layer_feats = error_feats["features"].get(layer, {})
+                for fid, hits in layer_feats.items():
+                    if fid in clean_fids:
+                        continue  # skip if also fires in clean text
+                    for pos, _act, _tok in hits:
+                        if pos in error_positions:
+                            counter[(layer, fid)] += 1
+                            break  # count once per pair
+
+        # Take top N by count (with min_count filter)
+        n_candidates = sum(1 for c in counter.values() if c >= min_count)
+        top = counter.most_common()
+        feats: dict[int, set[int]] = {layer: set() for layer in layers}
+        n_selected = 0
+        for (layer, fid), count in top:
+            if count < min_count:
+                break
+            feats[layer].add(fid)
+            n_selected += 1
+            if n_selected >= top_n:
+                break
+
+        print(f"  {et.value}: {n_candidates} candidates → {n_selected} selected (top-{top_n})")
+        per_type[et] = feats
+
+    return per_type
+
+
 def _build_feature_index(error_features: dict[int, set[int]]) -> list[tuple[int, int]]:
     """Build ordered list of (layer, feature_id) for consistent vector indexing."""
     index = []

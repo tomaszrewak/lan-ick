@@ -13,9 +13,8 @@ Completed: Token-level LR with activation magnitudes + threshold sweep. F1=92.0%
 ### ~~Explore higher thresholds and FP analysis~~ ✓ Done (Experiment 3)
 Completed: Pushed to 0.95 — F1=94.2%, P=91.2%, R=97.3%. Dominant FP source: `n't` contractions (4/7 FPs). Secondary: rare proper nouns. Contraction handling would eliminate most FPs.
 
-### Handle contractions and tokenizer artifacts
-**Goal:** The `n't` split (`' n'` + `'t'`) causes 4/7 false positives at threshold=0.95. Pre-process contractions before error scoring (expand or whitelist known patterns) to eliminate this systematic FP source.
-**Importance:** High — would reduce FP by ~57% with minimal effort, likely pushing F1 above 96%.
+### ~~Handle contractions and tokenizer artifacts~~ — Largely resolved by Exp 11
+The `n't` split FP was the dominant issue in Exp 3. Last-token-only scoring (Exp 11) skips the intermediate `' n'` fragment, leaving only `'t'` (which is a valid word-end). Spelling FP dropped from 8%→2.7% overall. May still be minor residual FP from contractions but no longer a priority.
 
 ### ~~Word order swap and similar-word replacement errors~~ ✓ Done (Experiment 4)
 Completed as part of full 6-type expansion. Word order detected 82%, word choice 82%, but type classification accuracy lower (44%, 67%). Grammar detected 90% but misclassified 78% of the time.
@@ -36,9 +35,26 @@ Completed: Each type gets its own features. extra_word hit 0% FP (perfect), spel
 ### ~~Feature selection method comparison~~ ✓ Done (Experiment 7)
 Completed: Compared 8 methods (baseline, relaxed, paired_token_diff, magnitude_diff, ttest, top_k_error). **relaxed_30** (min_pair_ratio=0.3) wins with F1=78.0%, unlocking grammar detection (18 features, 75% det, 9% FP). Token-comparison methods (paired_diff, ttest) find grammar but with unacceptable FP. Fixed-K methods (magnitude_diff, top_k_error) are fundamentally unsuitable — destroy spelling detection. The simple binary presence approach with a lower threshold is the best paradigm.
 
-### FP-constrained threshold selection
-**Goal:** Instead of optimizing F1 per type (which picks low thresholds for weak classifiers), set a max FP budget per type (e.g., 5%) and find the highest detection rate within that budget. This would let us ship only the types that are reliably separable (spelling, extra_word) and suppress the rest.
-**Importance:** Medium — less urgent now that per-type features naturally suppress weak types (grammar/missing_word get 0 features).
+### ~~FP-constrained threshold selection / per-type thresholds~~ ✓ Done (Experiment 13)
+Completed: Per-type threshold sweep with 5% FP budget. Clear win over global threshold — N=50 per-type: F1=81.6%, P=83.3%, FP#=24 vs global t=0.95: F1=79.6%, P=73.2%, FP#=48. Halves FP while improving F1. Permanent addition to the pipeline.
+
+### ~~Position-aware feature selection (error-word-only)~~ ✓ Done (Experiment 13)
+Completed: Only counts features firing at error word last-token positions, not anywhere in clean text. Candidate pools are large (240–979 per type), confirming many features fire specifically at error positions. Combined with top-N at N=50, produces comparable results to old min_pair_ratio=0.3 approach. word_order improved +9% (55%→64%). Permanent addition.
+
+### ~~Top-N feature selection (replace min_pair_ratio cutoff)~~ ✓ Done (Experiment 13)
+Completed: Rank by pair count, take top N globally per type. Swept N ∈ [25, 50, 100]. N=50 is the sweet spot — N=25 too few, N=100 overfits (word_order/missing_word collapse to 0%). Partially validated hypothesis: word_order detection improved +9%, but overall F1 similar to old approach. The LR can learn from 50 features but not 100 with only 75–156 positive tokens.
+
+### Non-linear classifier (Random Forest / gradient boosting)
+**Goal:** LR assumes linear separability. But error detection may involve feature interactions ("feature A fires AND feature B doesn't" is a signal LR can't capture with activation magnitudes alone). A small Random Forest or gradient-boosted classifier handles interactions naturally, is still interpretable via feature importances, and is a drop-in replacement for LR.
+**Importance:** Medium — Exp 13 showed the overfitting problem only appears at N=100 (not N=50), so linear separability isn't the current bottleneck. Still worth trying if results plateau.
+
+### K-fold cross-validation
+**Goal:** We use a single 75/25 split. With 25 test pairs per type at 600 pairs, a single pair swinging either way changes detection by 4%. Results may be noisy and we can't tell signal from variance. K-fold CV (e.g., 5-fold) would give mean ± std for all metrics and reveal if we're overfitting feature selection to the training split.
+**Importance:** Medium-high — critical for trusting results. Some past experiment "improvements" may have been noise.
+
+### Scale to 6000+ pairs
+**Goal:** With 600 pairs, feature extraction takes ~20 min (cached, one-time). 6000 pairs would be ~3 hours but gives 1000 per type, ~750 training pairs per type, and much more stable feature selection and classifier training. Weak types (missing_word, word_order) are especially starved for data.
+**Importance:** Medium — straightforward scaling, but requires the feature selection and classifier improvements first to be worth the compute cost.
 
 ### ~~Compare 16k vs 65k vs 262k SAE widths~~ ✓ Done (Experiment 8)
 Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 FPs at t=0.9). Feature counts similar across widths (~90 spelling, ~15 grammar). 65k found 0 features for missing_word. 262k extremely slow (per-layer eviction). **Conclusion: not worth the cost. Stick with 16k.**
@@ -60,6 +76,10 @@ Extended Exp 9's last-token-only training to also cover clean text training toke
 ### Layer sweep across all 26 layers
 **Goal:** Map exactly where error-detection signal emerges and peaks. Current experiment samples 5 layers; a full sweep would reveal the optimal layer(s) to use for the final classifier.
 **Importance:** High — needed to decide which layer(s) to bake into the fused model.
+
+### Missing word: label sentence-end punctuation instead of next word
+**Goal:** For missing_word errors, the current approach labels the word after the gap — but that word is valid, just in a surprising position. The signal may be too diffuse. Alternative: only generate missing_word errors in positions where the gap is followed by sentence-end punctuation, and label the punctuation token. By the end of the sentence, the model has full context to "know" a function word was missing somewhere. This shifts from local detection to sentence-level detection for this type only.
+**Importance:** Low — missing_word is the weakest type (28% det, 1 feature) and may be fundamentally hard for SAEs. Worth trying but not critical.
 
 ### ~~Separate spelling errors from grammar errors~~ ✓ Done (Experiment 4)
 Completed: Spelling is 100% detected and classified. Grammar is detected (90%) but misclassified 78% of the time — features overlap with word_choice and word_order. Low detection types (missing_word: 67%) are kept as-is; when they fire correctly it's useful, the priority is keeping FP low rather than maximizing recall.
