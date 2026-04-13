@@ -4,6 +4,8 @@
 
 Research project exploring whether LLM internal activations (decoded via Sparse Autoencoders) can detect spelling and grammar errors — detection only, not correction. Uses Gemma 3 1B (pretrained) with GemmaScope 2 SAEs.
 
+**Primary goal:** Maximize error detection correctness while keeping false positives very low. Low FP rate is the higher priority — false positives (underlining correct text) are far more annoying to users than missed errors. When tuning parameters and evaluating experiments, FP rate should be treated as a first-class metric alongside detection rate and F1.
+
 ## Architecture
 
 ```
