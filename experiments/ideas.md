@@ -55,6 +55,9 @@ Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 F
 ### ~~Next-token-after-word labeling~~ ✗ Failed (Experiment 10)
 Tested labeling the first token *after* the error word (instead of the last token *of* the word). Hypothesis was that the model only "knows" the word is complete at the next token (space boundary). Results: FP# 25→37 at t=0.9, precision 71.6%→64.1%. The next-token signal is noisier — influenced by what the following word is, not just the error. Last-token labeling (Exp 9) remains best.
 
+### ~~Last-token-only for training and classification~~ ✓ Done (Experiment 11)
+Extended Exp 9's last-token-only training to also cover clean text training tokens and prediction. Intermediate tokens within multi-token words oscillate between error/non-error representations — filtering to last-word tokens eliminates this noise. Results: spelling FP 8%→2.7%, overall FP# 25→22 at t=0.9, precision 76%→79.7% at t=0.95. Clear win, permanent change.
+
 ### Layer sweep across all 26 layers
 **Goal:** Map exactly where error-detection signal emerges and peaks. Current experiment samples 5 layers; a full sweep would reveal the optimal layer(s) to use for the final classifier.
 **Importance:** High — needed to decide which layer(s) to bake into the fused model.

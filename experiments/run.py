@@ -79,9 +79,12 @@ def main():
     error_scores: list[dict[ErrorType, float]] = []
     clean_scores: list[dict[ErrorType, float]] = []
 
-    for pf in test_features:
-        for text_key, scores_list in [("error", error_scores), ("clean", clean_scores)]:
-            tpreds = predict_tokens_ovr(pf[text_key], classifier)
+    for pf, pair in zip(test_features, test_pairs):
+        for text_key, text, scores_list in [
+            ("error", pair.error, error_scores),
+            ("clean", pair.clean, clean_scores),
+        ]:
+            tpreds = predict_tokens_ovr(pf[text_key], classifier, text=text)
             scores = {}
             for et in classifier.models:
                 scores[et] = max((tp.error_probs.get(et, 0.0) for tp in tpreds), default=0.0)

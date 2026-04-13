@@ -432,4 +432,46 @@ Comparison at t=0.9: Exp 9 had F1=77.3%, P=71.6%, FP#=25. Exp 10: F1=74.2%, P=64
 
 **Conclusion:** The "next token after error word" signal is noisier than the "last token of error word" signal. The last token of an error word has already seen all its characters and can detect something is wrong with the word itself. The next token's "surprise" at a word boundary doesn't encode as cleanly in SAE features — it's influenced by too many other factors (what the next word is, sentence structure, etc.). Reverted to Exp 9 approach (last-token labeling).
 
-**Commit:** 93cbf5c
+**Commit:** bd0a9a9
+
+---
+
+## Experiment 11: Last-token-only for both training and classification
+
+**Date:** 2026-04-13T21:30:00+02:00
+
+**Goal:** Extend last-token-only approach from training (Exp 9) to prediction. Currently, during classification all tokens are scored and max is taken across all of them. But intermediate tokens within multi-token words likely oscillate between error and non-error representations as the model processes the word piece by piece (e.g., `" re"` → fine, `"sou"` → maybe error, `"rce"` → fine, `"full"` → definitely error). These intermediate tokens add noise to sentence-level scoring. Also apply last-token-only to clean text during training — currently all clean tokens are used, but intermediate clean tokens have the same oscillation issue.
+
+**Hypothesis:** Using only last-word tokens everywhere (training both error and clean, prediction) should reduce false positives by eliminating noisy intermediate-token scores while preserving signal at the points where the model has complete word context.
+
+**Parameters:**
+- Same data: 300 pairs, 75/25 split, seed=42
+- Same layers: [7, 13, 17, 22], width 16k
+- Same feature selection: per-type, min_pair_ratio=0.3
+- Change 1: Clean text training uses only last token of each word (previously all tokens)
+- Change 2: Prediction scores only last token of each word (previously all tokens)
+- Sentence-level: max P(error) across last-word tokens only
+
+**Results:**
+
+| threshold | F1    | Precision | Recall | FP#  |
+|-----------|-------|-----------|--------|------|
+| 0.5       | 74.3% | 59.1%     | 100.0% | 52   |
+| 0.8       | 78.1% | 70.2%     | 88.0%  | 28   |
+| 0.9       | 78.0% | 73.8%     | 82.7%  | 22   |
+| 0.95      | 76.4% | 79.7%     | 73.3%  | 14   |
+
+Comparison at t=0.9 (vs Exp 9): F1 77.3%→78.0%, P 71.6%→73.8%, FP# 25→22.
+Comparison at t=0.95 (vs Exp 9): F1 76.0%→76.4%, P 76.0%→79.7%, FP# 18→14.
+
+Per-type highlights at t=0.9:
+- **Spelling FP collapsed: 8.0% → 2.7%** — biggest single gain. Intermediate clean-text tokens were triggering spelling features.
+- Extra_word: 91% detection, 0% FP (unchanged — already perfect).
+- Grammar: 90% detection, 12% FP (unchanged).
+- word_order: 36% detection, 8% FP (unchanged from Exp 9).
+
+Training token counts: clean tokens dropped from all tokens to ~1 per word (last-word filtering). Total training tokens dropped proportionally.
+
+**Conclusion:** Win. Filtering both training and prediction to last-word tokens reduces FP further by eliminating noisy intermediate-token activations. Spelling FP improvement is the most dramatic (8%→2.7%). The model's internal back-and-forth while processing multi-token words ("maybe error... no wait... yes error") was indeed adding noise at prediction time. This change should be permanent.
+
+**Commit:** 82289ba

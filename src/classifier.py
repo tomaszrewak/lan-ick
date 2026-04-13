@@ -386,7 +386,13 @@ def train_ovr(
                 y.append(1 if is_this_type else 0)
 
             clean_feats = pf["clean"]
-            for pos in range(len(clean_feats["tokens"])):
+            clean_tokens = clean_feats["tokens"]
+            clean_word_map = token_to_word_index(pair.clean, clean_tokens)
+            clean_last_tok = last_token_positions(clean_word_map)
+            clean_last_positions = set(clean_last_tok.values())
+            for pos in range(len(clean_tokens)):
+                if pos not in clean_last_positions:
+                    continue  # Skip non-last tokens of words
                 vec = _token_activation_vector(clean_feats, pos, feat_index)
                 X.append(vec)
                 y.append(0)
@@ -417,10 +423,24 @@ def train_ovr(
 def predict_tokens_ovr(
     text_features: dict,
     classifier: OVRClassifier,
+    text: str | None = None,
 ) -> list[TokenPrediction]:
-    """Score each token with all OVR classifiers, each using its own features."""
+    """Score tokens with all OVR classifiers, each using its own features.
+
+    If `text` is provided, only last tokens of each word are scored.
+    Other tokens get zero probability. This matches the training strategy
+    where only last-word tokens carry meaningful signal due to causal attention.
+    """
     tokens = text_features["tokens"]
     n_tokens = len(tokens)
+
+    # Determine which positions to score
+    if text is not None:
+        word_map = token_to_word_index(text, tokens)
+        last_tok = last_token_positions(word_map)
+        score_positions = set(last_tok.values())
+    else:
+        score_positions = set(range(n_tokens))
 
     # Pre-build position lookup: pos_acts[layer][fid][pos] = activation
     pos_acts: dict[int, dict[int, dict[int, float]]] = {}
@@ -429,22 +449,29 @@ def predict_tokens_ovr(
         for fid, hits in fid_dict.items():
             pos_acts[layer][fid] = {pos: act for pos, act, _tok in hits}
 
-    # For each error type, build full token matrix and batch predict
-    all_probs: dict = {}  # et -> np.ndarray of shape (n_tokens,)
+    # Build matrix only for scored positions
+    scored_list = sorted(score_positions)
+    n_scored = len(scored_list)
+
+    all_probs: dict = {}  # et -> dict[pos -> prob]
     for et, model in classifier.models.items():
         feat_index = classifier.per_type_index[et]
         n_feats = len(feat_index)
-        X = np.zeros((n_tokens, n_feats), dtype=np.float32)
+        X = np.zeros((n_scored, n_feats), dtype=np.float32)
         for i, (layer, fid) in enumerate(feat_index):
             fid_pos = pos_acts.get(layer, {}).get(fid, {})
-            for pos in range(n_tokens):
+            for j, pos in enumerate(scored_list):
                 if pos in fid_pos:
-                    X[pos, i] = fid_pos[pos]
-        all_probs[et] = model.predict_proba(X)[:, 1]
+                    X[j, i] = fid_pos[pos]
+        probs = model.predict_proba(X)[:, 1]
+        all_probs[et] = {pos: float(probs[j]) for j, pos in enumerate(scored_list)}
 
     predictions = []
     for pos in range(n_tokens):
-        error_probs = {et: float(all_probs[et][pos]) for et in classifier.models}
+        if pos in score_positions:
+            error_probs = {et: all_probs[et][pos] for et in classifier.models}
+        else:
+            error_probs = {et: 0.0 for et in classifier.models}
         p_error = max(error_probs.values()) if error_probs else 0.0
         predicted_type = max(error_probs, key=error_probs.get) if error_probs else None
         predictions.append(TokenPrediction(
