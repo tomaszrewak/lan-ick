@@ -20,6 +20,10 @@ Completed: Pushed to 0.95 — F1=94.2%, P=91.2%, R=97.3%. Dominant FP source: `n
 ### ~~Word order swap and similar-word replacement errors~~ ✓ Done (Experiment 4)
 Completed as part of full 6-type expansion. Word order detected 82%, word choice 82%, but type classification accuracy lower (44%, 67%). Grammar detected 90% but misclassified 78% of the time.
 
+### Smarter synthetic data generation
+**Goal:** Current corruption functions are naive — e.g., `corrupt_missing_word` randomly deletes any word, but deleting an adjective ("the big dog" → "the dog") is grammatically valid and undetectable. Invest in linguistically-aware generation: delete function words (articles, prepositions, auxiliaries) rather than content words; for grammar errors, target known agreement patterns (subject-verb, determiner-noun); for word choice, ensure the context makes the substitution clearly wrong. Better training data = better classifier, regardless of architecture.
+**Importance:** Very high — garbage in, garbage out. Low detection on some types may partly be a data quality issue.
+
 ### Scale up multi-class training data
 **Goal:** Exp 4 has only 50 pairs/type → 37 training pairs/type → tiny error token counts (grammar: 39 tokens, extra_word: 43). Scale to 150+ pairs per type (900+ total) to give the multi-class LR enough signal, especially for grammar and missing_word.
 **Importance:** Very high — data starvation is the likely cause of Exp 4's poor type classification.
@@ -40,9 +44,8 @@ Completed as part of full 6-type expansion. Word order detected 82%, word choice
 **Goal:** Map exactly where error-detection signal emerges and peaks. Current experiment samples 5 layers; a full sweep would reveal the optimal layer(s) to use for the final classifier.
 **Importance:** High — needed to decide which layer(s) to bake into the fused model.
 
-### Separate spelling errors from grammar errors
-**Goal:** Test whether SAE features distinguish misspellings (e.g., "teh") from grammatical errors (e.g., "she goed"). Currently our test pairs mix both types.
-**Importance:** Medium — important for understanding what the model actually detects and for reporting different error categories.
+### ~~Separate spelling errors from grammar errors~~ ✓ Done (Experiment 4)
+Completed: Spelling is 100% detected and classified. Grammar is detected (90%) but misclassified 78% of the time — features overlap with word_choice and word_order. Low detection types (missing_word: 67%) are kept as-is; when they fire correctly it's useful, the priority is keeping FP low rather than maximizing recall.
 
 ### Test on real-world text (not synthetic)
 **Goal:** Run the classifier on naturally occurring errors (e.g., from typo corpora, student essays, social media). Synthetic errors may not represent the distribution the model saw during training.
