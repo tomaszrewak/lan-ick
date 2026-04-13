@@ -17,13 +17,24 @@ Completed: Pushed to 0.95 — F1=94.2%, P=91.2%, R=97.3%. Dominant FP source: `n
 **Goal:** The `n't` split (`' n'` + `'t'`) causes 4/7 false positives at threshold=0.95. Pre-process contractions before error scoring (expand or whitelist known patterns) to eliminate this systematic FP source.
 **Importance:** High — would reduce FP by ~57% with minimal effort, likely pushing F1 above 96%.
 
-### Word order swap and similar-word replacement errors
-**Goal:** Add non-character-level error types: word order swaps ("the went she to store") and similar-word substitution ("their" → "there", "affect" → "effect"). Test whether SAE features detect semantic/syntactic errors, not just character-level.
-**Importance:** High — current errors are all character-level, limiting generalizability.
+### ~~Word order swap and similar-word replacement errors~~ ✓ Done (Experiment 4)
+Completed as part of full 6-type expansion. Word order detected 82%, word choice 82%, but type classification accuracy lower (44%, 67%). Grammar detected 90% but misclassified 78% of the time.
+
+### Scale up multi-class training data
+**Goal:** Exp 4 has only 50 pairs/type → 37 training pairs/type → tiny error token counts (grammar: 39 tokens, extra_word: 43). Scale to 150+ pairs per type (900+ total) to give the multi-class LR enough signal, especially for grammar and missing_word.
+**Importance:** Very high — data starvation is the likely cause of Exp 4's poor type classification.
+
+### One-vs-rest binary classifiers per error type
+**Goal:** Replace the single 7-class LR with separate binary classifiers (one per error type). Each answers "is this token a [type] error?" independently. May give better per-type separation since features don't have to disambiguate all types simultaneously.
+**Importance:** High — addresses the multi-class confusion seen in Exp 4 (grammar misclassified as other types).
 
 ### Compare 16k vs 65k vs 262k SAE widths
 **Goal:** Determine if wider SAEs produce sharper, more specific error-detection features. The 16k SAE may lump multiple error types into one feature; wider SAEs might separate them.
 **Importance:** High — directly affects detection granularity and the eventual classifier quality.
+
+### Test with only layers 5–13 (drop upper layers)
+**Goal:** Check if restricting to layers 5, 10, 13 (29 features) still matches the full 5-layer result (41 features). Layers 17 and 22 contribute only 13 features and the signal tapers off there. If performance holds, the fused model can be truncated at layer 13 instead of 22 — roughly halving the LLM portion and making classification significantly faster.
+**Importance:** High — directly determines how much of the model we can strip for the fused deployment.
 
 ### Layer sweep across all 26 layers
 **Goal:** Map exactly where error-detection signal emerges and peaks. Current experiment samples 5 layers; a full sweep would reveal the optimal layer(s) to use for the final classifier.

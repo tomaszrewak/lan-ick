@@ -1,9 +1,19 @@
-"""Synthetic data generation for error detection experiments."""
+"""Synthetic data generation for multi-class error detection experiments."""
 
 import random
 from dataclasses import dataclass, field
+from enum import Enum
 
 from datasets import load_dataset
+
+
+class ErrorType(str, Enum):
+    SPELLING = "spelling"
+    WORD_CHOICE = "word_choice"
+    GRAMMAR = "grammar"
+    WORD_ORDER = "word_order"
+    MISSING_WORD = "missing_word"
+    EXTRA_WORD = "extra_word"
 
 
 @dataclass
@@ -11,7 +21,8 @@ class TextPair:
     """A clean/error text pair for comparison experiments."""
     clean: str
     error: str
-    error_word_indices: list[int] = field(default_factory=list)  # which words (by space-split index) were corrupted
+    error_type: ErrorType = ErrorType.SPELLING
+    error_word_labels: dict[int, ErrorType] = field(default_factory=dict)
 
 
 # --------------- Error injection ---------------
@@ -58,42 +69,199 @@ def _insert_char(word: str, rng: random.Random) -> str:
     return word[:pos + 1] + inserted + word[pos + 1:]
 
 
-ERROR_FUNCTIONS = [_swap_adjacent_chars, _delete_char, _insert_char]
+_SPELLING_FUNCS = [_swap_adjacent_chars, _delete_char, _insert_char]
 
 
-def corrupt_sentence(
-    sentence: str,
-    rng: random.Random,
-    min_errors: int = 2,
-    max_errors: int = 4,
-) -> tuple[str, list[int]]:
-    """Inject character-level errors into a sentence.
-
-    Corrupts min_errors to max_errors words (chosen randomly).
-    Only corrupts words of length >= 3 (skips short words like "a", "I", "to").
-
-    Returns:
-        (corrupted_text, list of corrupted word indices)
-    """
+def corrupt_spelling(sentence, rng, min_errors=1, max_errors=3):
+    """Inject character-level spelling errors. Returns (text, labels) or None."""
     words = sentence.split()
-    # Eligible word indices (len >= 3, alphabetic)
     eligible = [i for i, w in enumerate(words) if len(w) >= 3 and w.isalpha()]
-
     if not eligible:
-        return sentence, []
-
+        return None
     n_errors = rng.randint(min_errors, min(max_errors, len(eligible)))
     targets = rng.sample(eligible, n_errors)
-
-    actually_corrupted = []
+    labels = {}
     for idx in targets:
-        fn = rng.choice(ERROR_FUNCTIONS)
+        fn = rng.choice(_SPELLING_FUNCS)
         new_word = fn(words[idx], rng)
         if new_word != words[idx]:
             words[idx] = new_word
-            actually_corrupted.append(idx)
+            labels[idx] = ErrorType.SPELLING
+    if not labels:
+        return None
+    return " ".join(words), labels
 
-    return " ".join(words), sorted(actually_corrupted)
+
+# --------------- Word choice errors ---------------
+
+CONFUSABLES = {
+    "their": ["there"], "there": ["their"],
+    "your": ["you're"], "you're": ["your"],
+    "its": ["it's"], "it's": ["its"],
+    "to": ["too"], "too": ["to"],
+    "then": ["than"], "than": ["then"],
+    "no": ["know"], "know": ["no"],
+    "here": ["hear"], "hear": ["here"],
+    "right": ["write"], "write": ["right"],
+    "by": ["buy"], "buy": ["by"],
+    "new": ["knew"], "knew": ["new"],
+    "see": ["sea"], "sea": ["see"],
+    "seen": ["scene"], "scene": ["seen"],
+    "where": ["wear"], "wear": ["where"],
+    "sense": ["since"], "since": ["sense"],
+    "role": ["roll"], "roll": ["role"],
+    "through": ["threw"], "threw": ["through"],
+    "quite": ["quiet"], "quiet": ["quite"],
+    "whole": ["hole"], "hole": ["whole"],
+    "lead": ["led"], "led": ["lead"],
+    "passed": ["past"], "past": ["passed"],
+    "peace": ["piece"], "piece": ["peace"],
+    "bare": ["bear"], "bear": ["bare"],
+    "fair": ["fare"], "fare": ["fair"],
+    "week": ["weak"], "weak": ["week"],
+    "way": ["weigh"], "made": ["maid"],
+    "real": ["reel"], "won": ["one"], "one": ["won"],
+    "not": ["knot"], "some": ["sum"],
+    "affect": ["effect"], "effect": ["affect"],
+    "accept": ["except"], "except": ["accept"],
+    "loose": ["lose"], "lose": ["loose"],
+    "weather": ["whether"], "whether": ["weather"],
+    "brake": ["break"], "break": ["brake"],
+    "advice": ["advise"], "advise": ["advice"],
+    "principal": ["principle"], "principle": ["principal"],
+}
+
+
+def corrupt_word_choice(sentence, rng):
+    """Substitute confusable words. Returns (text, labels) or None."""
+    words = sentence.split()
+    eligible = []
+    for i, w in enumerate(words):
+        key = w.lower().rstrip(".,!?;:")
+        if key in CONFUSABLES:
+            eligible.append(i)
+    if not eligible:
+        return None
+    n_errors = rng.randint(1, min(2, len(eligible)))
+    targets = rng.sample(eligible, n_errors)
+    labels = {}
+    for idx in targets:
+        w = words[idx]
+        stripped = w.rstrip(".,!?;:")
+        punct = w[len(stripped):]
+        key = stripped.lower()
+        replacement = rng.choice(CONFUSABLES[key])
+        if stripped[0].isupper():
+            replacement = replacement[0].upper() + replacement[1:]
+        words[idx] = replacement + punct
+        labels[idx] = ErrorType.WORD_CHOICE
+    if not labels:
+        return None
+    return " ".join(words), labels
+
+
+# --------------- Grammar errors ---------------
+
+GRAMMAR_SWAPS = {
+    "is": "are", "are": "is",
+    "was": "were", "were": "was",
+    "has": "have", "have": "has",
+    "does": "do", "do": "does",
+    "this": "these", "these": "this",
+    "that": "those", "those": "that",
+    "a": "an", "an": "a",
+}
+
+
+def corrupt_grammar(sentence, rng):
+    """Introduce grammatical agreement errors. Returns (text, labels) or None."""
+    words = sentence.split()
+    eligible = []
+    for i, w in enumerate(words):
+        key = w.lower().rstrip(".,!?;:")
+        if key in GRAMMAR_SWAPS:
+            eligible.append(i)
+    if not eligible:
+        return None
+    n_errors = rng.randint(1, min(2, len(eligible)))
+    targets = rng.sample(eligible, n_errors)
+    labels = {}
+    for idx in targets:
+        w = words[idx]
+        stripped = w.rstrip(".,!?;:")
+        punct = w[len(stripped):]
+        key = stripped.lower()
+        replacement = GRAMMAR_SWAPS[key]
+        if stripped[0].isupper():
+            replacement = replacement[0].upper() + replacement[1:]
+        words[idx] = replacement + punct
+        labels[idx] = ErrorType.GRAMMAR
+    if not labels:
+        return None
+    return " ".join(words), labels
+
+
+# --------------- Word order errors ---------------
+
+def corrupt_word_order(sentence, rng):
+    """Swap two adjacent words. Returns (text, labels) or None."""
+    words = sentence.split()
+    if len(words) < 4:
+        return None
+    eligible = [i for i in range(1, len(words) - 2)
+                if len(words[i]) >= 2 and len(words[i + 1]) >= 2]
+    if not eligible:
+        return None
+    idx = rng.choice(eligible)
+    words[idx], words[idx + 1] = words[idx + 1], words[idx]
+    labels = {idx: ErrorType.WORD_ORDER, idx + 1: ErrorType.WORD_ORDER}
+    return " ".join(words), labels
+
+
+# --------------- Missing word errors ---------------
+
+def corrupt_missing_word(sentence, rng):
+    """Delete a word from the sentence. Returns (text, labels) or None."""
+    words = sentence.split()
+    if len(words) < 6:
+        return None
+    eligible = [i for i in range(1, len(words) - 1) if len(words[i]) >= 2]
+    if not eligible:
+        return None
+    idx = rng.choice(eligible)
+    new_words = words[:idx] + words[idx + 1:]
+    # Label the word that shifted into the gap position
+    label_idx = min(idx, len(new_words) - 1)
+    labels = {label_idx: ErrorType.MISSING_WORD}
+    return " ".join(new_words), labels
+
+
+# --------------- Extra/duplicate word errors ---------------
+
+def corrupt_extra_word(sentence, rng):
+    """Duplicate a word in the sentence. Returns (text, labels) or None."""
+    words = sentence.split()
+    if len(words) < 4:
+        return None
+    eligible = [i for i in range(len(words)) if len(words[i]) >= 2 and words[i].isalpha()]
+    if not eligible:
+        return None
+    idx = rng.choice(eligible)
+    new_words = words[:idx + 1] + [words[idx]] + words[idx + 1:]
+    labels = {idx + 1: ErrorType.EXTRA_WORD}
+    return " ".join(new_words), labels
+
+
+# --------------- Corruption dispatch ---------------
+
+_CORRUPT_FUNCTIONS = {
+    ErrorType.SPELLING: corrupt_spelling,
+    ErrorType.WORD_CHOICE: corrupt_word_choice,
+    ErrorType.GRAMMAR: corrupt_grammar,
+    ErrorType.WORD_ORDER: corrupt_word_order,
+    ErrorType.MISSING_WORD: corrupt_missing_word,
+    ErrorType.EXTRA_WORD: corrupt_extra_word,
+}
 
 
 # --------------- Data generation ---------------
@@ -104,15 +272,10 @@ def generate_synthetic_pairs(
     max_words: int = 20,
     seed: int = 42,
 ) -> list[TextPair]:
-    """Generate synthetic clean/error pairs from SST2 sentences.
-
-    Loads SST2 train split, filters by word count, corrupts with
-    character-level errors.
-    """
+    """Generate synthetic clean/error pairs balanced across error types."""
     rng = random.Random(seed)
 
-    # Load SST2 and filter
-    print(f"  Loading SST2 dataset...")
+    print("  Loading SST2 dataset...")
     ds = load_dataset("stanfordnlp/sst2", split="train")
 
     candidates = []
@@ -120,67 +283,46 @@ def generate_synthetic_pairs(
         text = row["sentence"].strip()
         words = text.split()
         if min_words <= len(words) <= max_words:
-            # Ensure it ends with punctuation
-            if not text[-1] in ".!?":
+            if text[-1] not in ".!?":
                 text += "."
-            # Ensure first letter is capitalized
             text = text[0].upper() + text[1:]
             candidates.append(text)
 
     rng.shuffle(candidates)
-    selected = candidates[:n_pairs]
-    print(f"  Selected {len(selected)} sentences from {len(candidates)} candidates")
+    print(f"  {len(candidates)} candidate sentences")
+
+    n_types = len(ErrorType)
+    per_type = n_pairs // n_types
+    target = {et: per_type + (1 if i < n_pairs % n_types else 0)
+              for i, et in enumerate(ErrorType)}
+
+    pairs_by_type: dict[ErrorType, list[TextPair]] = {et: [] for et in ErrorType}
+
+    for clean in candidates:
+        needed = [et for et in ErrorType if len(pairs_by_type[et]) < target[et]]
+        if not needed:
+            break
+        rng.shuffle(needed)
+        for et in needed:
+            result = _CORRUPT_FUNCTIONS[et](clean, rng)
+            if result is not None:
+                error_text, labels = result
+                if error_text != clean:
+                    pairs_by_type[et].append(TextPair(
+                        clean=clean, error=error_text,
+                        error_type=et, error_word_labels=labels,
+                    ))
+                    break
 
     pairs = []
-    for clean in selected:
-        error, error_indices = corrupt_sentence(clean, rng)
-        # Ensure the error text is actually different
-        if error != clean:
-            pairs.append(TextPair(clean=clean, error=error, error_word_indices=error_indices))
+    for et in ErrorType:
+        count = len(pairs_by_type[et])
+        print(f"  {et.value}: {count}/{target[et]} pairs")
+        pairs.extend(pairs_by_type[et])
 
-    print(f"  Generated {len(pairs)} pairs ({len(selected) - len(pairs)} skipped — no change)")
+    rng.shuffle(pairs)
+    print(f"  Total: {len(pairs)} pairs")
     return pairs
-
-
-def generate_test_pairs() -> list[TextPair]:
-    """Hand-crafted test pairs with common spelling/grammar errors.
-
-    Covers: misspellings, dropped letters, wrong verb forms, extra letters.
-    """
-    return [
-        TextPair(
-            clean="The quick brown fox jumped over the lazy dog.",
-            error="Teh qucik brwon fox jumpd over teh lazy dog.",
-        ),
-        TextPair(
-            clean="She went to the store and bought some apples.",
-            error="She goed to teh store and buyed some aples.",
-        ),
-        TextPair(
-            clean="The children were playing happily in the garden.",
-            error="The childrens was playing hapily in the graden.",
-        ),
-        TextPair(
-            clean="I have been thinking about this problem for a long time.",
-            error="I has been thinkng about this problm for a long tme.",
-        ),
-        TextPair(
-            clean="The restaurant serves excellent Italian food every evening.",
-            error="The resturant serves excelent Italain food evry evening.",
-        ),
-        TextPair(
-            clean="My neighbor recommended a wonderful book about history.",
-            error="My nieghbor recomended a wonderfull book about histry.",
-        ),
-        TextPair(
-            clean="The government announced new policies for education reform.",
-            error="The goverment anounced new policys for educaton reform.",
-        ),
-        TextPair(
-            clean="Scientists discovered an interesting pattern in the data.",
-            error="Scientits discoverd an intresting patern in the data.",
-        ),
-    ]
 
 
 def token_to_word_index(text: str, str_tokens: list[str]) -> list[int | None]:

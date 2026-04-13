@@ -1,15 +1,12 @@
-"""SAE-based token-level spelling error classifier.
+"""SAE-based multi-class error classifier.
 
 Three-phase design:
   1. select_features()  — find SAE features that indicate errors
   2. train()            — train logistic regression on token-level activation vectors
-  3. predict_sentence() — score each token, aggregate to sentence-level P(error)
+  3. predict_sentence() — score each token, aggregate to sentence-level
 
-The classifier takes SAE activations at selected features as input and outputs
-P(error) ∈ [0, 1] per token. Sentence-level prediction uses max token score.
-
-Single output for now; designed so adding more outputs (spelling vs grammar)
-later is just adding a head.
+The classifier outputs per-token probabilities for 6 error types + clean.
+Sentence-level prediction uses max P(any error) across tokens.
 """
 
 from collections import Counter
@@ -18,7 +15,21 @@ from dataclasses import dataclass, field
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
-from src.data import TextPair, token_to_word_index
+from src.data import ErrorType, TextPair, token_to_word_index
+
+
+# --------------- Label mapping ---------------
+
+LABEL_CLEAN = 0
+ERROR_TYPE_TO_LABEL = {
+    ErrorType.SPELLING: 1,
+    ErrorType.WORD_CHOICE: 2,
+    ErrorType.GRAMMAR: 3,
+    ErrorType.WORD_ORDER: 4,
+    ErrorType.MISSING_WORD: 5,
+    ErrorType.EXTRA_WORD: 6,
+}
+LABEL_TO_ERROR_TYPE = {v: k for k, v in ERROR_TYPE_TO_LABEL.items()}
 
 
 # --------------- Feature selection ---------------
@@ -26,25 +37,38 @@ from src.data import TextPair, token_to_word_index
 def select_features(
     pair_features: list[dict],
     layers: list[int],
+    train_pairs: list[TextPair],
     min_pair_ratio: float = 0.5,
 ) -> dict[int, set[int]]:
-    """Find SAE features that are error-indicative.
+    """Find SAE features that are error-indicative, per error type.
 
-    A feature is "error-indicative" at a layer if it fires in the error text
-    but NOT in the clean text, in >= min_pair_ratio of training pairs.
+    A feature is selected if it fires in error but NOT clean text in
+    >= min_pair_ratio of pairs *of at least one error type*. This prevents
+    dilution when different error types activate different features.
     """
-    n_pairs = len(pair_features)
-    min_pairs = max(2, int(n_pairs * min_pair_ratio))
+    from src.data import ErrorType
 
-    error_features: dict[int, set[int]] = {}
-    for layer in layers:
-        counter: Counter[int] = Counter()
-        for pf in pair_features:
-            clean_fids = set(pf["clean"]["features"].get(layer, {}).keys())
-            error_fids = set(pf["error"]["features"].get(layer, {}).keys())
-            for fid in error_fids - clean_fids:
-                counter[fid] += 1
-        error_features[layer] = {fid for fid, cnt in counter.items() if cnt >= min_pairs}
+    # Group pair indices by error type
+    type_indices: dict[ErrorType, list[int]] = {}
+    for i, pair in enumerate(train_pairs):
+        type_indices.setdefault(pair.error_type, []).append(i)
+
+    error_features: dict[int, set[int]] = {layer: set() for layer in layers}
+
+    for et, indices in type_indices.items():
+        n_type = len(indices)
+        min_pairs = max(2, int(n_type * min_pair_ratio))
+
+        for layer in layers:
+            counter: Counter[int] = Counter()
+            for idx in indices:
+                pf = pair_features[idx]
+                clean_fids = set(pf["clean"]["features"].get(layer, {}).keys())
+                error_fids = set(pf["error"]["features"].get(layer, {}).keys())
+                for fid in error_fids - clean_fids:
+                    counter[fid] += 1
+            selected = {fid for fid, cnt in counter.items() if cnt >= min_pairs}
+            error_features[layer] |= selected
 
     return error_features
 
@@ -107,10 +131,9 @@ def train(
     layers: list[int],
     error_features: dict[int, set[int]],
 ) -> TrainedClassifier:
-    """Train token-level logistic regression.
+    """Train multi-class token-level logistic regression.
 
-    Collects token activation vectors from error texts, labels tokens
-    belonging to corrupted words as 1, others as 0. Fits LR.
+    Labels: 0=clean, 1-6 for each ErrorType.
     """
     feature_index = _build_feature_index(error_features)
     n_features = len(feature_index)
@@ -122,16 +145,18 @@ def train(
     y_rows = []
 
     for pf, pair in zip(train_pair_features, train_pairs):
-        # Error text: label tokens by whether their word was corrupted
+        # Error text: label tokens by their error type
         error_feats = pf["error"]
         error_tokens = error_feats["tokens"]
         word_map = token_to_word_index(pair.error, error_tokens)
-        error_word_set = set(pair.error_word_indices)
 
         for pos in range(len(error_tokens)):
             vec = _token_activation_vector(error_feats, pos, feature_index)
             word_idx = word_map[pos]
-            label = 1 if (word_idx is not None and word_idx in error_word_set) else 0
+            if word_idx is not None and word_idx in pair.error_word_labels:
+                label = ERROR_TYPE_TO_LABEL[pair.error_word_labels[word_idx]]
+            else:
+                label = LABEL_CLEAN
             X_rows.append(vec)
             y_rows.append(label)
 
@@ -141,12 +166,16 @@ def train(
         for pos in range(len(clean_tokens)):
             vec = _token_activation_vector(clean_feats, pos, feature_index)
             X_rows.append(vec)
-            y_rows.append(0)
+            y_rows.append(LABEL_CLEAN)
 
     X = np.array(X_rows)
     y = np.array(y_rows)
 
-    print(f"  Training LR on {len(X)} tokens ({y.sum()} error, {len(y) - y.sum()} clean)")
+    n_error = (y != LABEL_CLEAN).sum()
+    type_counts = {LABEL_TO_ERROR_TYPE[l].value: (y == l).sum()
+                   for l in range(1, 7) if (y == l).sum() > 0}
+    print(f"  Training LR on {len(X)} tokens ({n_error} error, {len(y) - n_error} clean)")
+    print(f"  Per-type tokens: {type_counts}")
 
     lr = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=42)
     lr.fit(X, y)
@@ -163,10 +192,12 @@ def train(
 
 @dataclass
 class TokenPrediction:
-    """Per-token error probability."""
+    """Per-token error probability with type breakdown."""
     position: int
     token: str
     p_error: float
+    error_probs: dict[ErrorType, float] = field(default_factory=dict)
+    predicted_type: ErrorType | None = None
     word_index: int | None = None
 
 
@@ -175,6 +206,7 @@ class SentencePrediction:
     """Sentence-level prediction with token details."""
     has_errors: bool
     max_p_error: float
+    predicted_type: ErrorType | None = None
     token_predictions: list[TokenPrediction] = field(default_factory=list)
 
 
@@ -182,17 +214,32 @@ def predict_tokens(
     text_features: dict,
     classifier: TrainedClassifier,
 ) -> list[TokenPrediction]:
-    """Score each token in a text for P(error)."""
+    """Score each token for P(error) and per-type probabilities."""
     tokens = text_features["tokens"]
+    classes = classifier.model.classes_
     predictions = []
 
     for pos in range(len(tokens)):
         vec = _token_activation_vector(text_features, pos, classifier.feature_index)
-        p_error = classifier.model.predict_proba(vec.reshape(1, -1))[0, 1]
+        probas = classifier.model.predict_proba(vec.reshape(1, -1))[0]
+
+        error_probs = {}
+        p_clean = 0.0
+        for i, cls in enumerate(classes):
+            if cls == LABEL_CLEAN:
+                p_clean = probas[i]
+            elif cls in LABEL_TO_ERROR_TYPE:
+                error_probs[LABEL_TO_ERROR_TYPE[cls]] = float(probas[i])
+
+        p_error = 1.0 - p_clean
+        predicted_type = max(error_probs, key=error_probs.get) if error_probs else None
+
         predictions.append(TokenPrediction(
             position=pos,
             token=tokens[pos],
-            p_error=p_error,
+            p_error=float(p_error),
+            error_probs=error_probs,
+            predicted_type=predicted_type,
         ))
 
     return predictions
@@ -204,10 +251,14 @@ def predict_sentence(
 ) -> SentencePrediction:
     """Predict whether a text contains errors. Uses max token P(error)."""
     token_preds = predict_tokens(text_features, classifier)
-    max_p = max(tp.p_error for tp in token_preds) if token_preds else 0.0
+    if not token_preds:
+        return SentencePrediction(has_errors=False, max_p_error=0.0)
+    max_pred = max(token_preds, key=lambda t: t.p_error)
+    has_errors = max_pred.p_error >= classifier.sentence_threshold
     return SentencePrediction(
-        has_errors=max_p >= classifier.sentence_threshold,
-        max_p_error=max_p,
+        has_errors=has_errors,
+        max_p_error=max_pred.p_error,
+        predicted_type=max_pred.predicted_type if has_errors else None,
         token_predictions=token_preds,
     )
 
@@ -293,5 +344,3 @@ def evaluate(
             metrics.tn += 1
 
     return metrics
-
-    return result

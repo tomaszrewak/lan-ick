@@ -109,3 +109,49 @@ All experiments are logged here in chronological order. Append-only — never de
 - F1=94.2% is strong for a purely interpretable, SAE-based classifier on synthetic data
 
 **Commit:** 5639505
+
+---
+
+## Experiment 4: Multi-class error detection (6 error types)
+
+**Date:** 2026-04-13T14:00:00+02:00
+
+**Goal:** Expand from binary (error/clean) to 6 error categories: spelling, word choice, grammar, word order, missing word, extra/duplicate word. Test whether SAE features can distinguish between error types, not just detect errors vs clean text.
+
+**Hypothesis:** Spelling errors should remain highly detectable (proven in Exp 1-3). Grammar and word choice errors may activate different SAE features (semantic/syntactic vs orthographic). Word order and missing/extra word might require attention-related features from different layers. Expect overall detection F1 lower than 94.2% initially due to harder error types, but expect some type separation in the feature space.
+
+**Parameters:**
+- Same layers [5, 10, 13, 17, 22], width 16k
+- 300 pairs balanced across 6 types (~50 per type)
+- Multi-class token-level LR (7 classes: clean + 6 error types)
+- Threshold sweep for binary detection + per-type analysis at best threshold
+- New data and features (cache invalidated by new generation logic)
+
+**Results:**
+- Feature selection: had to refactor `select_features()` to work per-type (50% threshold per type, then union). Global 50% across 225 pairs was impossible for type-specific features. New result: 43 features (layer 5: 13, layer 10: 12, layer 13: 8, layer 17: 5, layer 22: 5).
+- LR convergence warning (1000 iterations hit) — 7-class problem is harder to separate.
+- Binary detection (error vs clean) at threshold=0.95: **F1=73.3%, P=62.9%, R=88.0%** — major regression from Exp 3's 94.2%.
+- 39 false positives (up from 7) — the multi-class model is much nosier on clean text.
+- Per-type detection rates:
+  | Type | Total | Detected | Det% | Correct Type | TypeAcc% |
+  |------|-------|----------|------|-------------|----------|
+  | spelling | 13 | 13 | 100% | 13 | 100% |
+  | word_choice | 11 | 9 | 82% | 6 | 67% |
+  | grammar | 20 | 18 | 90% | 4 | 22% |
+  | word_order | 11 | 9 | 82% | 4 | 44% |
+  | missing_word | 9 | 6 | 67% | 1 | 17% |
+  | extra_word | 11 | 11 | 100% | 9 | 82% |
+- Spelling and extra_word are strong: 100% detection, high type accuracy.
+- Grammar is detected (90%) but almost always misclassified (22% type accuracy).
+- Missing_word is hardest to detect (67%) and virtually impossible to classify (17%).
+- FP analysis: proper nouns, contractions, and unusual names still dominate FPs — same pattern as Exp 3 but amplified because the multi-class model is more trigger-happy.
+
+**Conclusions:**
+- Spelling remains the strongest signal — SAE features clearly encode character-level anomalies.
+- Extra_word is surprisingly well-detected — duplicated words create a distinctive activation pattern.
+- Grammar detection exists but the type classifier confuses it with other types — grammar errors (is→are, a→an) may not produce unique SAE signatures distinct from word choice errors.
+- Missing_word is the weakest — absence of a word doesn't produce a distinctive token-level activation (the gap isn't a token).
+- The multi-class LR struggles with 7 classes on 43 features with heavy class imbalance (465 error vs 7110 clean tokens). Next steps: more data per type, possibly separate binary classifiers per type instead of a single multi-class model.
+- Overall binary detection degraded significantly — the model is now trying to do too much with too little data per type.
+
+**Commit:** 7a8b239
