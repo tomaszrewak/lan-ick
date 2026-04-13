@@ -44,13 +44,17 @@ Completed: Only counts features firing at error word last-token positions, not a
 ### ~~Top-N feature selection (replace min_pair_ratio cutoff)~~ ✓ Done (Experiment 13)
 Completed: Rank by pair count, take top N globally per type. Swept N ∈ [25, 50, 100]. N=50 is the sweet spot — N=25 too few, N=100 overfits (word_order/missing_word collapse to 0%). Partially validated hypothesis: word_order detection improved +9%, but overall F1 similar to old approach. The LR can learn from 50 features but not 100 with only 75–156 positive tokens.
 
-### Non-linear classifier (Random Forest / gradient boosting)
-**Goal:** LR assumes linear separability. But error detection may involve feature interactions ("feature A fires AND feature B doesn't" is a signal LR can't capture with activation magnitudes alone). A small Random Forest or gradient-boosted classifier handles interactions naturally, is still interpretable via feature importances, and is a drop-in replacement for LR.
-**Importance:** Medium — Exp 13 showed the overfitting problem only appears at N=100 (not N=50), so linear separability isn't the current bottleneck. Still worth trying if results plateau.
+### ~~Non-linear classifier (Random Forest / gradient boosting)~~ ✗ Failed (Experiment 14)
+Tested RF (100 trees, max_depth=8, balanced) as drop-in replacement for LR. RF per-type F1=73.3% vs LR 81.6%. RF probability calibration clusters around 0.5, making threshold tuning impossible — t=0.8 drops recall to 35%. LR wins for sparse, low-data regimes. The subpopulation hypothesis is plausible but can't be validated with 75–156 positive tokens per type.
+
+### Negative-example features (clean-only activation counterweight)
+**Goal:** Current feature selection has survivorship bias — we pick features that fire on error words but not clean text. But the classifier only sees "error evidence" and has no "correctness evidence". There should also be features that fire at last-token positions in clean text but NOT at error word positions — these are "this word looks normal" signals. Adding them as negative features gives the classifier a counterweight: high activation on a negative feature pushes P(error) down, making the decision boundary more robust.
+**Selection method:** Mirror the position-aware selection — for each type, find features that fire at last-word positions in clean text of that type's pairs but never fire at error word last-token positions. Rank by pair count, take top N_neg. Concatenate positive + negative feature vectors for training.
+**Importance:** High — directly addresses the asymmetry in our feature space. The classifier currently sees a 50-dimensional "error signal" but has zero dimensions of "correctness signal". Even a few strong negative features could sharply reduce FP by giving the model evidence that a token is *correct*.
 
 ### K-fold cross-validation
 **Goal:** We use a single 75/25 split. With 25 test pairs per type at 600 pairs, a single pair swinging either way changes detection by 4%. Results may be noisy and we can't tell signal from variance. K-fold CV (e.g., 5-fold) would give mean ± std for all metrics and reveal if we're overfitting feature selection to the training split.
-**Importance:** Medium-high — critical for trusting results. Some past experiment "improvements" may have been noise.
+**Importance:** Medium — critical for trusting results. Some past experiment "improvements" may have been noise.
 
 ### Scale to 6000+ pairs
 **Goal:** With 600 pairs, feature extraction takes ~20 min (cached, one-time). 6000 pairs would be ~3 hours but gives 1000 per type, ~750 training pairs per type, and much more stable feature selection and classifier training. Weak types (missing_word, word_order) are especially starved for data.

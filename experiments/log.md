@@ -619,3 +619,59 @@ Feature distribution for N=50: spelling L7:17/L13:16/L17:11/L22:6, word_choice L
 - The non-linear classifier idea (Random Forest) may not be needed since N=50 doesn't show the "too many features for linear separation" problem — that only appears at N=100.
 
 **Commit:** 20ada16
+
+---
+
+## Experiment 14: Non-linear classifier (Random Forest vs Logistic Regression)
+
+**Date:** 2026-04-13T23:45:00+02:00
+
+**Goal:** Replace LR with Random Forest in the OVR pipeline. LR assumes a single linear decision boundary, but error detection likely has subpopulations — most errors cluster into a clearly separable region, but smaller subsets don't conform to the main boundary (e.g., subtle grammar errors vs obvious ones). A tree-based classifier partitions the feature space into regions, each with its own decision rule, naturally handling these non-conforming pockets. Also captures feature interactions LR misses.
+
+**Hypothesis:** RF should improve detection for types where LR struggles (grammar, word_order, word_choice) by finding non-linear boundaries around subpopulations. May also reduce the extreme thresholds needed for grammar (t=0.99). Spelling and extra_word are already near-perfect with LR, so less room for improvement there. Risk: RF may overfit with only 75–156 positive tokens per type — trees are greedier than LR.
+
+**Parameters:**
+- Same data: 600 pairs, 100/type, 75/25 split, seed=42
+- Same layers: [7, 13, 17, 22], width 16k
+- Same features: position-aware top-50
+- Classifiers compared: LR (baseline) vs RF (n_estimators=100, max_depth=8, class_weight="balanced")
+- Same evaluation: per-type thresholds with 5% FP budget + global thresholds
+
+**Results:**
+
+Per-type thresholds (FP ≤ 5%) comparison:
+
+| Metric    | LR        | RF        |
+|-----------|-----------|-----------|
+| F1        | **81.6%** | 73.3%     |
+| Precision | 83.3%     | 82.5%     |
+| Recall    | **80.0%** | 66.0%     |
+| FP#       | 24        | **21**    |
+
+RF per-type breakdown (FP ≤ 5%):
+
+| Type         | LR Thresh | LR Det | RF Thresh | RF Det |
+|--------------|-----------|--------|-----------|--------|
+| spelling     | 0.93      | 90%    | 0.50      | 86%    |
+| word_choice  | 0.93      | 55%    | 0.50      | 41%    |
+| grammar      | 0.99      | 74%    | 0.62      | 70%    |
+| word_order   | 0.96      | 64%    | 0.59      | 36%    |
+| missing_word | 1.00      | 0%     | 0.51      | 20%    |
+| extra_word   | 0.50      | 100%   | 0.50      | 96%    |
+
+RF at global thresholds collapses rapidly: t=0.5 F1=74.8%, t=0.8 F1=50.7%, t=0.9 F1=25.0%.
+
+**Observations:**
+- **RF probability calibration is the killer**: RF outputs fraction-of-trees as probability, which clusters around 0.5. Most positive predictions are 0.5–0.7, making thresholds above 0.5 destroy detection. LR's sigmoid produces well-spread probabilities (0.0–1.0) that allow fine-grained threshold tuning.
+- **RF does not find non-conforming subpopulations**: The hypothesis was that tree splits would capture pockets of hard-to-classify errors. But with 75–156 positive tokens per type and balanced weighting, RF produces noisy trees that average out to weak predictions. The subpopulations exist but are too small for 100 trees × max_depth=8 to carve out reliably.
+- **RF gets slightly fewer FP (21 vs 24)**: The low RF thresholds (all near 0.50) are effectively "any tree says error" — this is conservative but also misses many true errors. LR with high thresholds is more discriminating.
+- **missing_word improved to 20% with RF vs 0% with LR**: RF's lower threshold requirement (0.51 vs 1.00) lets some through. But this comes from RF's poor calibration, not from better learning.
+- **Overall**: The non-conforming subpopulation hypothesis is plausible but unsupported at this data scale. 75–156 positive examples per type can't train a 100-tree forest with depth 8 effectively. The problem isn't linear separability — it's data quantity. LR remains the better classifier for sparse, low-data regimes.
+
+**Conclusions:**
+- LR wins decisively. RF's poor probability calibration makes it worse at threshold-based detection.
+- Revert RF changes from `src/classifier.py` — the `classifier_type` parameter adds complexity without benefit.
+- The subpopulation idea might work with 10x more data (6000 pairs), but that's independent of classifier choice.
+- Next: try negative features (clean-only activations as counterweight) — this addresses the asymmetry in feature space, which is orthogonal to classifier choice.
+
+**Commit:** *(pending)*
