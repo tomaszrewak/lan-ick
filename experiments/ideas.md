@@ -10,9 +10,12 @@ Completed: 300 pairs, F1=70.1%. Features dropped from 204→41 (more selective).
 ### ~~Tune threshold + use activation magnitudes~~ ✓ Done (Experiment 2)
 Completed: Token-level LR with activation magnitudes + threshold sweep. F1=92.0% (up from 70.1%). Perfect recall at all thresholds.
 
-### Explore higher thresholds and FP analysis
-**Goal:** Push threshold above 0.8 (0.85, 0.9, 0.95) since recall is still 100%. Inspect the 13 remaining FP sentences to understand what triggers false positives — unusual grammar? rare words?
-**Importance:** High — we may be able to reach F1>95% with no code changes.
+### ~~Explore higher thresholds and FP analysis~~ ✓ Done (Experiment 3)
+Completed: Pushed to 0.95 — F1=94.2%, P=91.2%, R=97.3%. Dominant FP source: `n't` contractions (4/7 FPs). Secondary: rare proper nouns. Contraction handling would eliminate most FPs.
+
+### Handle contractions and tokenizer artifacts
+**Goal:** The `n't` split (`' n'` + `'t'`) causes 4/7 false positives at threshold=0.95. Pre-process contractions before error scoring (expand or whitelist known patterns) to eliminate this systematic FP source.
+**Importance:** High — would reduce FP by ~57% with minimal effort, likely pushing F1 above 96%.
 
 ### Word order swap and similar-word replacement errors
 **Goal:** Add non-character-level error types: word order swaps ("the went she to store") and similar-word substitution ("their" → "there", "affect" → "effect"). Test whether SAE features detect semantic/syntactic errors, not just character-level.

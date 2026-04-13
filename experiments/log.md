@@ -73,3 +73,39 @@ All experiments are logged here in chronological order. Append-only — never de
 - Even higher thresholds (0.85, 0.9) worth exploring since recall hasn't started to drop
 
 **Commit:** d75d83b
+
+---
+
+## Experiment 3: Higher thresholds and false positive analysis
+
+**Date:** 2026-04-13T13:00:00+02:00
+
+**Goal:** Push the sentence threshold above 0.8 (0.85, 0.9, 0.95) to find the precision/recall sweet spot. Inspect the false positive sentences to understand what triggers them — unusual grammar, rare words, or genuine ambiguity?
+
+**Hypothesis:** Since recall is still 100% at threshold=0.8, we have room to push higher. Expect to reach F1>95% before recall starts dropping. FP sentences likely contain unusual token patterns (rare words, informal grammar) that overlap with character-level error signals.
+
+**Parameters:**
+- Same data and features as Exp 2 (all cached)
+- Extended threshold sweep: 0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95
+- Print FP sentences and their top-scoring tokens at best threshold
+
+**Results:**
+- F1 keeps improving all the way to 0.95, where recall finally dips:
+  - 0.8: P=85.2%, R=100%, F1=92.0% (FP=13)
+  - 0.85: P=87.2%, R=100%, F1=93.2% (FP=11)
+  - 0.9: P=88.2%, R=100%, F1=93.8% (FP=10)
+  - **0.95: P=91.2%, R=97.3%, F1=94.2% (FP=7, FN=2)**
+- Best: **Accuracy=94.0%, Precision=91.2%, Recall=97.3%, F1=94.2%** at threshold=0.95
+- False positive analysis (7 FPs at 0.95):
+  - 4/7 contain `n't` tokenized as `' n'` + `'t'` — the model sees these as suspicious fragments
+  - Remaining 3 triggered by unusual proper nouns/words: "cloyingly hagiographic", "soderbergh", "bubba ho-tep"
+  - Pattern: the model flags subword fragments that look like character-level errors (split tokens, rare morphemes)
+
+**Conclusions:**
+- Recall is rock-solid: 100% through threshold=0.9, only drops to 97.3% at 0.95
+- The dominant FP source is `n't` contractions — the tokenizer splits these into fragments that resemble spelling errors to the SAE features
+- Fixing this could be done upstream (contraction normalization) or downstream (whitelist known subword patterns)
+- Rare proper nouns are a secondary FP source — inherent limitation when the model has limited exposure to those tokens
+- F1=94.2% is strong for a purely interpretable, SAE-based classifier on synthetic data
+
+**Commit:** 5639505
