@@ -188,7 +188,7 @@ def train(
     )
 
 
-# --------------- Prediction ---------------
+# --------------- Shared dataclasses ---------------
 
 @dataclass
 class TokenPrediction:
@@ -208,6 +208,234 @@ class SentencePrediction:
     max_p_error: float
     predicted_type: ErrorType | None = None
     token_predictions: list[TokenPrediction] = field(default_factory=list)
+
+
+@dataclass
+class Metrics:
+    """Classification metrics from evaluating on test pairs."""
+    tp: int = 0  # error sentence correctly detected
+    fp: int = 0  # clean sentence wrongly flagged
+    tn: int = 0  # clean sentence correctly passed
+    fn: int = 0  # error sentence missed
+
+    @property
+    def total(self) -> int:
+        return self.tp + self.fp + self.tn + self.fn
+
+    @property
+    def accuracy(self) -> float:
+        return (self.tp + self.tn) / self.total if self.total else 0.0
+
+    @property
+    def precision(self) -> float:
+        return self.tp / (self.tp + self.fp) if (self.tp + self.fp) else 0.0
+
+    @property
+    def recall(self) -> float:
+        return self.tp / (self.tp + self.fn) if (self.tp + self.fn) else 0.0
+
+    @property
+    def f1(self) -> float:
+        p, r = self.precision, self.recall
+        return 2 * p * r / (p + r) if (p + r) else 0.0
+
+    def confusion_str(self) -> str:
+        return (
+            f"              Predicted\n"
+            f"              Error  Clean\n"
+            f"  Actual Error  {self.tp:>4}  {self.fn:>4}\n"
+            f"  Actual Clean  {self.fp:>4}  {self.tn:>4}"
+        )
+
+    def summary(self) -> str:
+        return (
+            f"Accuracy={self.accuracy:.1%}  Precision={self.precision:.1%}  "
+            f"Recall={self.recall:.1%}  F1={self.f1:.1%}  "
+            f"(TP={self.tp} FP={self.fp} TN={self.tn} FN={self.fn})"
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "tp": self.tp, "fp": self.fp, "tn": self.tn, "fn": self.fn,
+            "accuracy": round(self.accuracy, 4),
+            "precision": round(self.precision, 4),
+            "recall": round(self.recall, 4),
+            "f1": round(self.f1, 4),
+        }
+
+
+# --------------- OVR Training ---------------
+
+@dataclass
+class OVRClassifier:
+    """One-vs-rest: independent binary LR per error type."""
+    error_features: dict[int, set[int]]
+    feature_index: list[tuple[int, int]]
+    layers: list[int]
+    models: dict[ErrorType, LogisticRegression] = field(default_factory=dict)
+    thresholds: dict[ErrorType, float] = field(default_factory=dict)
+
+    @property
+    def total_features(self) -> int:
+        return len(self.feature_index)
+
+    def summary(self) -> str:
+        parts = [f"layer {l}: {len(self.error_features.get(l, set()))} features"
+                 for l in self.layers]
+        types = ", ".join(et.value for et in self.models)
+        return (f"OVRClassifier({', '.join(parts)}, total={self.total_features}, "
+                f"types=[{types}])")
+
+
+def train_ovr(
+    train_pair_features: list[dict],
+    train_pairs: list[TextPair],
+    layers: list[int],
+    error_features: dict[int, set[int]],
+) -> OVRClassifier:
+    """Train one binary LR per error type.
+
+    For each type, label=1 for tokens of that type, label=0 for everything else.
+    """
+    feature_index = _build_feature_index(error_features)
+    if not feature_index:
+        raise ValueError("No error features selected — cannot train classifier")
+
+    # Build token dataset once: (vector, word_idx, error_type_or_None) per token
+    token_data: list[tuple[np.ndarray, ErrorType | None]] = []
+
+    for pf, pair in zip(train_pair_features, train_pairs):
+        # Error text tokens
+        error_feats = pf["error"]
+        error_tokens = error_feats["tokens"]
+        word_map = token_to_word_index(pair.error, error_tokens)
+        for pos in range(len(error_tokens)):
+            vec = _token_activation_vector(error_feats, pos, feature_index)
+            word_idx = word_map[pos]
+            if word_idx is not None and word_idx in pair.error_word_labels:
+                token_data.append((vec, pair.error_word_labels[word_idx]))
+            else:
+                token_data.append((vec, None))
+
+        # Clean text tokens — all None (clean)
+        clean_feats = pf["clean"]
+        for pos in range(len(clean_feats["tokens"])):
+            vec = _token_activation_vector(clean_feats, pos, feature_index)
+            token_data.append((vec, None))
+
+    X_all = np.array([td[0] for td in token_data])
+    labels_all = [td[1] for td in token_data]
+
+    print(f"  OVR training on {len(X_all)} tokens")
+
+    models = {}
+    for et in ErrorType:
+        y = np.array([1 if lbl == et else 0 for lbl in labels_all])
+        n_pos = y.sum()
+        if n_pos < 2:
+            print(f"  {et.value}: skipped (only {n_pos} positive tokens)")
+            continue
+        lr = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=42)
+        lr.fit(X_all, y)
+        print(f"  {et.value}: {n_pos} positive tokens, trained")
+        models[et] = lr
+
+    return OVRClassifier(
+        error_features=error_features,
+        feature_index=feature_index,
+        layers=layers,
+        models=models,
+        thresholds={et: 0.5 for et in models},
+    )
+
+
+# --------------- OVR Prediction ---------------
+
+def predict_tokens_ovr(
+    text_features: dict,
+    classifier: OVRClassifier,
+) -> list[TokenPrediction]:
+    """Score each token with all OVR classifiers."""
+    tokens = text_features["tokens"]
+    predictions = []
+
+    for pos in range(len(tokens)):
+        vec = _token_activation_vector(text_features, pos, classifier.feature_index)
+        vec_2d = vec.reshape(1, -1)
+
+        error_probs = {}
+        for et, model in classifier.models.items():
+            p = float(model.predict_proba(vec_2d)[0, 1])
+            error_probs[et] = p
+
+        # p_error = max probability across all types
+        p_error = max(error_probs.values()) if error_probs else 0.0
+        predicted_type = max(error_probs, key=error_probs.get) if error_probs else None
+
+        predictions.append(TokenPrediction(
+            position=pos,
+            token=tokens[pos],
+            p_error=float(p_error),
+            error_probs=error_probs,
+            predicted_type=predicted_type,
+        ))
+
+    return predictions
+
+
+def predict_sentence_ovr(
+    text_features: dict,
+    classifier: OVRClassifier,
+) -> SentencePrediction:
+    """Predict using OVR classifiers with per-type thresholds.
+
+    A sentence has errors if any token exceeds that type's threshold.
+    """
+    token_preds = predict_tokens_ovr(text_features, classifier)
+    if not token_preds:
+        return SentencePrediction(has_errors=False, max_p_error=0.0)
+
+    # Check each type's threshold independently
+    best_type = None
+    best_p = 0.0
+    for tp in token_preds:
+        for et, p in tp.error_probs.items():
+            if p > best_p:
+                best_p = p
+                best_type = et
+
+    # Has errors if the best score exceeds its type's threshold
+    has_errors = best_type is not None and best_p >= classifier.thresholds.get(best_type, 0.5)
+
+    max_pred = max(token_preds, key=lambda t: t.p_error)
+    return SentencePrediction(
+        has_errors=has_errors,
+        max_p_error=max_pred.p_error,
+        predicted_type=best_type if has_errors else None,
+        token_predictions=token_preds,
+    )
+
+
+def evaluate_ovr(
+    test_pair_features: list[dict],
+    classifier: OVRClassifier,
+) -> Metrics:
+    """Evaluate OVR classifier on test pairs (binary: error vs clean)."""
+    metrics = Metrics()
+    for pf in test_pair_features:
+        error_pred = predict_sentence_ovr(pf["error"], classifier)
+        if error_pred.has_errors:
+            metrics.tp += 1
+        else:
+            metrics.fn += 1
+
+        clean_pred = predict_sentence_ovr(pf["clean"], classifier)
+        if clean_pred.has_errors:
+            metrics.fp += 1
+        else:
+            metrics.tn += 1
+
+    return metrics
 
 
 def predict_tokens(
@@ -263,61 +491,7 @@ def predict_sentence(
     )
 
 
-# --------------- Evaluation ---------------
-
-@dataclass
-class Metrics:
-    """Classification metrics from evaluating on test pairs."""
-    tp: int = 0  # error sentence correctly detected
-    fp: int = 0  # clean sentence wrongly flagged
-    tn: int = 0  # clean sentence correctly passed
-    fn: int = 0  # error sentence missed
-
-    @property
-    def total(self) -> int:
-        return self.tp + self.fp + self.tn + self.fn
-
-    @property
-    def accuracy(self) -> float:
-        return (self.tp + self.tn) / self.total if self.total else 0.0
-
-    @property
-    def precision(self) -> float:
-        return self.tp / (self.tp + self.fp) if (self.tp + self.fp) else 0.0
-
-    @property
-    def recall(self) -> float:
-        return self.tp / (self.tp + self.fn) if (self.tp + self.fn) else 0.0
-
-    @property
-    def f1(self) -> float:
-        p, r = self.precision, self.recall
-        return 2 * p * r / (p + r) if (p + r) else 0.0
-
-    def confusion_str(self) -> str:
-        return (
-            f"              Predicted\n"
-            f"              Error  Clean\n"
-            f"  Actual Error  {self.tp:>4}  {self.fn:>4}\n"
-            f"  Actual Clean  {self.fp:>4}  {self.tn:>4}"
-        )
-
-    def summary(self) -> str:
-        return (
-            f"Accuracy={self.accuracy:.1%}  Precision={self.precision:.1%}  "
-            f"Recall={self.recall:.1%}  F1={self.f1:.1%}  "
-            f"(TP={self.tp} FP={self.fp} TN={self.tn} FN={self.fn})"
-        )
-
-    def to_dict(self) -> dict:
-        return {
-            "tp": self.tp, "fp": self.fp, "tn": self.tn, "fn": self.fn,
-            "accuracy": round(self.accuracy, 4),
-            "precision": round(self.precision, 4),
-            "recall": round(self.recall, 4),
-            "f1": round(self.f1, 4),
-        }
-
+# --------------- Evaluation (multi-class) ---------------
 
 def evaluate(
     test_pair_features: list[dict],

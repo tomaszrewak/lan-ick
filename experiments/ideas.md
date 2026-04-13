@@ -28,9 +28,12 @@ Completed as part of full 6-type expansion. Word order detected 82%, word choice
 **Goal:** Exp 4 has only 50 pairs/type → 37 training pairs/type → tiny error token counts (grammar: 39 tokens, extra_word: 43). Scale to 150+ pairs per type (900+ total) to give the multi-class LR enough signal, especially for grammar and missing_word.
 **Importance:** Very high — data starvation is the likely cause of Exp 4's poor type classification.
 
-### One-vs-rest binary classifiers per error type
-**Goal:** Replace the single 7-class LR with separate binary classifiers (one per error type). Each answers "is this token a [type] error?" independently. May give better per-type separation since features don't have to disambiguate all types simultaneously.
-**Importance:** High — addresses the multi-class confusion seen in Exp 4 (grammar misclassified as other types).
+### ~~One-vs-rest binary classifiers per error type~~ ✓ Done (Experiment 5)
+Completed: 6 binary LRs trained. Spelling (92% det, 8% FP) and extra_word (91% det, 1.3% FP) work well. Grammar/word_order/missing_word have high FP — not separable with current features. Combined F1=72% (no improvement over Exp 4). Per-type insight is the main value.
+
+### FP-constrained threshold selection
+**Goal:** Instead of optimizing F1 per type (which picks low thresholds for weak classifiers), set a max FP budget per type (e.g., 5%) and find the highest detection rate within that budget. This would let us ship only the types that are reliably separable (spelling, extra_word) and suppress the rest.
+**Importance:** High — directly addresses the FP flood from weak classifiers seen in Exp 5.
 
 ### Compare 16k vs 65k vs 262k SAE widths
 **Goal:** Determine if wider SAEs produce sharper, more specific error-detection features. The 16k SAE may lump multiple error types into one feature; wider SAEs might separate them.

@@ -155,3 +155,44 @@ All experiments are logged here in chronological order. Append-only — never de
 - Overall binary detection degraded significantly — the model is now trying to do too much with too little data per type.
 
 **Commit:** 7a8b239
+
+---
+
+## Experiment 5: One-vs-rest binary classifiers per error type
+
+**Date:** 2026-04-13T15:30:00+02:00
+
+**Goal:** Replace the single 7-class LR with 6 independent binary classifiers, one per error type. Each classifier answers "is this token a [type] error?" with its own threshold. This should reduce FP (each classifier is simpler and can be tuned independently) and reveal which error types are genuinely separable in SAE feature space.
+
+**Hypothesis:** Binary classifiers will be easier to fit (2 classes instead of 7) and can each specialize. Spelling and extra_word should improve significantly. Grammar/word_choice may still overlap. Per-type thresholds allow being conservative on weak types (missing_word) and aggressive on strong ones (spelling). Overall binary detection should recover toward Exp 3's F1=94%.
+
+**Parameters:**
+- Same cached data and features from Exp 4 (300 pairs, 50 per type)
+- Same layers [5, 10, 13, 17, 22], width 16k
+- 6 binary LR classifiers (class_weight='balanced'), one per ErrorType
+- Per-type threshold sweep: 0.5–0.99
+- Report: per-type detection+FP rates, combined binary detection, comparison to Exp 4
+
+**Results:**
+- Combined F1=72.0% (Precision=60.4%, Recall=89.3%) — regression from Exp 4 (F1=73.3%)
+- Per-type best thresholds (by F1): spelling=0.99, word_choice=0.9, grammar=0.5, word_order=0.99, missing_word=0.5, extra_word=0.6
+- Per-type detection at best thresholds:
+  - spelling: 92% detected, 8% FP, 92% type accuracy — excellent
+  - extra_word: 91% detected, 1.3% FP, 73% type accuracy — excellent
+  - word_choice: 82% detected at t=0.9, 23% FP — moderate
+  - grammar: 85% detected at t=0.5, 39% FP — high FP, classifier too trigger-happy
+  - word_order: 36% detected at t=0.99, 8% FP — weak, high FP at lower thresholds (71% FP at 0.5)
+  - missing_word: 89% detected at t=0.5, 76% FP — near-random; the classifier cannot separate this type
+- 44 FPs in combined mode. FP analysis: proper nouns (rafael, wertmuller, hong kong), contractions ('s), and subword BPE fragments are main false triggers
+- Convergence warning on one classifier (max_iter=2000 insufficient)
+- Type accuracy generally poor: word_order 11%, grammar 24% — classifiers fire on wrong types
+
+**Conclusions:**
+- OVR approach works very well for **spelling** and **extra_word** (low FP, high detection), confirming these are genuinely separable in SAE space
+- **grammar**, **word_order**, and **missing_word** are not currently separable — they produce too many FPs even at high thresholds. These types either need better data (more examples, clearer signal) or operate at different SAE layers/widths
+- The combined binary F1 is slightly worse than Exp 4's single multi-class → OVR doesn't help overall, but it provides per-type insight
+- Per-type thresholding is valuable: we can ship spelling+extra_word detection confidence and suppress the others
+- The F1-optimal threshold selection picks low thresholds for weak classifiers (grammar=0.5, missing_word=0.5), which floods FPs. A better strategy: pick thresholds to keep FP below a budget (e.g., max 5% per type)
+- Next steps: FP-constrained threshold selection, better synthetic data (longer/harder examples), or investigate which SAE layers best serve each error type
+
+**Commit:** 78ce733
