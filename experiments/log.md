@@ -299,3 +299,58 @@ Key observations:
 - `relaxed_30` should become the new default feature selection method.
 
 **Commit:** 37916de
+
+---
+
+## Experiment 8: SAE width comparison (16k vs 65k vs 262k)
+
+**Date:** 2026-04-13T18:00:00+02:00
+
+**Goal:** Determine whether wider SAEs produce more specific error-detection features with lower FP rates. Grammar and missing_word have zero features at 16k — wider SAEs might have features that distinguish these types. Primary focus: does wider SAE width reduce FP while maintaining (or improving) detection?
+
+**Hypothesis:** Wider SAEs decompose activations into finer-grained features. At 16k, grammar errors may activate features shared with clean text (→ no selection). At 65k/262k, the same activation might split into a grammar-specific feature and a clean-text feature, enabling selection. Expect: more features per type, lower FP rates for existing types (spelling, extra_word), and new signal for grammar/missing_word.
+
+**Parameters:**
+- Widths: 16k, 65k, 262k
+- Layers: [7, 13, 17, 22] (subset where all three widths are available)
+- Feature selection: per-type binary presence, min_pair_ratio=0.3 (Exp 7 winner)
+- Same data: 300 pairs, 75/25 split, seed=42
+- Same classifier: OVR binary LR, threshold sweep [0.5, 0.8, 0.9, 0.95]
+- VRAM management: evict SAE cache between widths to fit 262k (~2.25 GB/SAE)
+
+**Results:**
+
+Comparison at threshold=0.9:
+
+| Width | F1 | Precision | FP# | spelling | word_choice | grammar | word_order | missing_word | extra_word |
+|-------|------|-----------|-----|----------|-------------|---------|------------|-------------|------------|
+| 16k | 75.4% | 66.0% | 34 | 100% | 64% | 90% | 36% | 11% | 91% |
+| 65k | 75.1% | 64.2% | 38 | 100% | 73% | 90% | 46% | — | 100% |
+| 262k | 76.7% | 68.0% | 31 | 92% | 73% | 85% | 54% | 0% | 100% |
+
+Comparison at threshold=0.95:
+
+| Width | F1 | Precision | FP# |
+|-------|------|-----------|-----|
+| 16k | 73.4% | 69.9% | 25 |
+| 65k | 76.3% | 67.3% | 32 |
+| 262k | 77.1% | 70.3% | 27 |
+
+Feature counts per type:
+
+| Width | spelling | word_choice | grammar | word_order | missing_word | extra_word |
+|-------|----------|-------------|---------|------------|-------------|------------|
+| 16k | 89 | 26 | 12 | 12 | 3 | 17 |
+| 65k | 86 | 20 | 16 | 9 | 0 | 20 |
+| 262k | 92 | 27 | 13 | 13 | 1 | 19 |
+
+**Observations:**
+- Width has surprisingly little effect on feature counts or overall performance. All widths find ~90 spelling features, ~15 grammar features.
+- 262k is marginally best: +1.3% F1, +2% precision, -3 FPs vs 16k at threshold=0.9.
+- 65k found 0 features for missing_word (worse than 16k's 3). Wider ≠ always better.
+- 262k improved word_order detection most (36% → 54%) — the only type with clear width benefit.
+- spelling detection actually dropped at 262k (100% → 92%) — wider SAE may split key features.
+- 262k extraction was extremely slow due to per-layer SAE eviction (2.25 GB/SAE, 8 reloads per pair).
+- **Conclusion:** The marginal gains do not justify 16x wider SAEs and dramatically slower inference. Stick with 16k for now. The bottleneck is not feature granularity — it's data quality and inherent difficulty of types like missing_word.
+
+**Commit:** d3c60a5

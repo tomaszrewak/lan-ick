@@ -41,9 +41,8 @@ Completed: Compared 8 methods (baseline, relaxed, paired_token_diff, magnitude_d
 **Goal:** Instead of optimizing F1 per type (which picks low thresholds for weak classifiers), set a max FP budget per type (e.g., 5%) and find the highest detection rate within that budget. This would let us ship only the types that are reliably separable (spelling, extra_word) and suppress the rest.
 **Importance:** Medium — less urgent now that per-type features naturally suppress weak types (grammar/missing_word get 0 features).
 
-### Compare 16k vs 65k vs 262k SAE widths
-**Goal:** Determine if wider SAEs produce sharper, more specific error-detection features. The 16k SAE may lump multiple error types into one feature; wider SAEs might separate them. Exp 6 showed grammar and missing_word have ZERO features at 16k — wider SAEs are the most likely path to rescuing these types.
-**Importance:** Very high — the main bottleneck for multi-type detection. Grammar/missing_word are invisible at 16k.
+### ~~Compare 16k vs 65k vs 262k SAE widths~~ ✓ Done (Experiment 8)
+Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 FPs at t=0.9). Feature counts similar across widths (~90 spelling, ~15 grammar). 65k found 0 features for missing_word. 262k extremely slow (per-layer eviction). **Conclusion: not worth the cost. Stick with 16k.**
 
 ### Test with only layers 5–13 (drop upper layers)
 **Goal:** Check if restricting to layers 5, 10, 13 (29 features) still matches the full 5-layer result (41 features). Layers 17 and 22 contribute only 13 features and the signal tapers off there. If performance holds, the fused model can be truncated at layer 13 instead of 22 — roughly halving the LLM portion and making classification significantly faster.

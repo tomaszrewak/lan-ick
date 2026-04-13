@@ -47,6 +47,17 @@ def load_model(device: str = DEVICE):
 _sae_cache: dict[str, SAE] = {}
 
 
+def clear_sae_cache():
+    """Evict all cached SAEs to free VRAM."""
+    for sae in _sae_cache.values():
+        del sae
+    _sae_cache.clear()
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def load_sae(layer: int, width: str = "16k", device: str = DEVICE) -> SAE:
     """Load a GemmaScope 2 SAE for a given layer. Cached after first call."""
     key = f"{layer}-{width}"
