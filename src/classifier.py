@@ -1,55 +1,37 @@
-"""SAE-based spelling/grammar error classifier.
+"""SAE-based token-level spelling error classifier.
 
-Two-phase design:
-  1. train()   — learn which SAE features indicate errors (from clean/error pairs)
-  2. predict() — given a single text's features, predict whether it contains errors
+Three-phase design:
+  1. select_features()  — find SAE features that indicate errors
+  2. train()            — train logistic regression on token-level activation vectors
+  3. predict_sentence() — score each token, aggregate to sentence-level P(error)
 
-The interface and internals will evolve between experiments.
+The classifier takes SAE activations at selected features as input and outputs
+P(error) ∈ [0, 1] per token. Sentence-level prediction uses max token score.
+
+Single output for now; designed so adding more outputs (spelling vs grammar)
+later is just adding a head.
 """
 
 from collections import Counter
 from dataclasses import dataclass, field
 
+import numpy as np
+from sklearn.linear_model import LogisticRegression
 
-# --------------- Trained model ---------------
-
-@dataclass
-class TrainedClassifier:
-    """Learned error-detection model: a set of error-indicative SAE features per layer."""
-    error_features: dict[int, set[int]]  # {layer: {feature_ids}}
-    layers: list[int]
-    min_active_features: int = 1  # how many error features must fire to predict "has errors"
-
-    @property
-    def total_features(self) -> int:
-        return sum(len(fids) for fids in self.error_features.values())
-
-    def summary(self) -> str:
-        parts = [f"layer {l}: {len(self.error_features.get(l, set()))} features"
-                 for l in self.layers]
-        return f"TrainedClassifier({', '.join(parts)}, threshold={self.min_active_features})"
+from src.data import TextPair, token_to_word_index
 
 
-# --------------- Training ---------------
+# --------------- Feature selection ---------------
 
-def train(
+def select_features(
     pair_features: list[dict],
     layers: list[int],
     min_pair_ratio: float = 0.5,
-) -> TrainedClassifier:
-    """Learn error-indicative features from training pairs.
+) -> dict[int, set[int]]:
+    """Find SAE features that are error-indicative.
 
     A feature is "error-indicative" at a layer if it fires in the error text
     but NOT in the clean text, in >= min_pair_ratio of training pairs.
-
-    Args:
-        pair_features: list of {"clean": text_features, "error": text_features}
-            where text_features = {"tokens": [...], "features": {layer: {fid: [...]}}}
-        layers: which layers to analyze.
-        min_pair_ratio: fraction of pairs a feature must be error-only in.
-
-    Returns:
-        TrainedClassifier with identified error features.
     """
     n_pairs = len(pair_features)
     min_pairs = max(2, int(n_pairs * min_pair_ratio))
@@ -64,39 +46,169 @@ def train(
                 counter[fid] += 1
         error_features[layer] = {fid for fid, cnt in counter.items() if cnt >= min_pairs}
 
-    return TrainedClassifier(error_features=error_features, layers=layers)
+    return error_features
+
+
+def _build_feature_index(error_features: dict[int, set[int]]) -> list[tuple[int, int]]:
+    """Build ordered list of (layer, feature_id) for consistent vector indexing."""
+    index = []
+    for layer in sorted(error_features.keys()):
+        for fid in sorted(error_features[layer]):
+            index.append((layer, fid))
+    return index
+
+
+# --------------- Token activation vectors ---------------
+
+def _token_activation_vector(
+    text_features: dict,
+    token_pos: int,
+    feature_index: list[tuple[int, int]],
+) -> np.ndarray:
+    """Build activation vector for a single token position.
+
+    Returns array of shape (n_features,) with activation values.
+    """
+    vec = np.zeros(len(feature_index), dtype=np.float32)
+    for i, (layer, fid) in enumerate(feature_index):
+        hits = text_features["features"].get(layer, {}).get(fid, [])
+        for pos, act, _tok in hits:
+            if pos == token_pos:
+                vec[i] = act
+                break
+    return vec
+
+
+# --------------- Training ---------------
+
+@dataclass
+class TrainedClassifier:
+    """Token-level logistic regression error classifier."""
+    error_features: dict[int, set[int]]
+    feature_index: list[tuple[int, int]]
+    layers: list[int]
+    model: LogisticRegression = None
+    sentence_threshold: float = 0.5
+
+    @property
+    def total_features(self) -> int:
+        return len(self.feature_index)
+
+    def summary(self) -> str:
+        parts = [f"layer {l}: {len(self.error_features.get(l, set()))} features"
+                 for l in self.layers]
+        return (f"TrainedClassifier({', '.join(parts)}, "
+                f"total={self.total_features}, threshold={self.sentence_threshold})")
+
+
+def train(
+    train_pair_features: list[dict],
+    train_pairs: list[TextPair],
+    layers: list[int],
+    error_features: dict[int, set[int]],
+) -> TrainedClassifier:
+    """Train token-level logistic regression.
+
+    Collects token activation vectors from error texts, labels tokens
+    belonging to corrupted words as 1, others as 0. Fits LR.
+    """
+    feature_index = _build_feature_index(error_features)
+    n_features = len(feature_index)
+
+    if n_features == 0:
+        raise ValueError("No error features selected — cannot train classifier")
+
+    X_rows = []
+    y_rows = []
+
+    for pf, pair in zip(train_pair_features, train_pairs):
+        # Error text: label tokens by whether their word was corrupted
+        error_feats = pf["error"]
+        error_tokens = error_feats["tokens"]
+        word_map = token_to_word_index(pair.error, error_tokens)
+        error_word_set = set(pair.error_word_indices)
+
+        for pos in range(len(error_tokens)):
+            vec = _token_activation_vector(error_feats, pos, feature_index)
+            word_idx = word_map[pos]
+            label = 1 if (word_idx is not None and word_idx in error_word_set) else 0
+            X_rows.append(vec)
+            y_rows.append(label)
+
+        # Clean text: all tokens are label=0
+        clean_feats = pf["clean"]
+        clean_tokens = clean_feats["tokens"]
+        for pos in range(len(clean_tokens)):
+            vec = _token_activation_vector(clean_feats, pos, feature_index)
+            X_rows.append(vec)
+            y_rows.append(0)
+
+    X = np.array(X_rows)
+    y = np.array(y_rows)
+
+    print(f"  Training LR on {len(X)} tokens ({y.sum()} error, {len(y) - y.sum()} clean)")
+
+    lr = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=42)
+    lr.fit(X, y)
+
+    return TrainedClassifier(
+        error_features=error_features,
+        feature_index=feature_index,
+        layers=layers,
+        model=lr,
+    )
 
 
 # --------------- Prediction ---------------
 
 @dataclass
-class Prediction:
-    """Result of running the classifier on a single text."""
+class TokenPrediction:
+    """Per-token error probability."""
+    position: int
+    token: str
+    p_error: float
+    word_index: int | None = None
+
+
+@dataclass
+class SentencePrediction:
+    """Sentence-level prediction with token details."""
     has_errors: bool
-    total_hits: int
-    hits_per_layer: dict[int, int] = field(default_factory=dict)
+    max_p_error: float
+    token_predictions: list[TokenPrediction] = field(default_factory=list)
 
 
-def predict(text_features: dict, classifier: TrainedClassifier) -> Prediction:
-    """Predict whether a text contains errors.
+def predict_tokens(
+    text_features: dict,
+    classifier: TrainedClassifier,
+) -> list[TokenPrediction]:
+    """Score each token in a text for P(error)."""
+    tokens = text_features["tokens"]
+    predictions = []
 
-    Args:
-        text_features: output of extract_text_features() —
-            {"tokens": [...], "features": {layer: {fid: [...]}}}
-        classifier: trained classifier.
-    """
-    hits_per_layer = {}
-    total_hits = 0
-    for layer in classifier.layers:
-        text_fids = set(text_features["features"].get(layer, {}).keys())
-        hits = text_fids & classifier.error_features.get(layer, set())
-        hits_per_layer[layer] = len(hits)
-        total_hits += len(hits)
+    for pos in range(len(tokens)):
+        vec = _token_activation_vector(text_features, pos, classifier.feature_index)
+        p_error = classifier.model.predict_proba(vec.reshape(1, -1))[0, 1]
+        predictions.append(TokenPrediction(
+            position=pos,
+            token=tokens[pos],
+            p_error=p_error,
+        ))
 
-    return Prediction(
-        has_errors=total_hits >= classifier.min_active_features,
-        total_hits=total_hits,
-        hits_per_layer=hits_per_layer,
+    return predictions
+
+
+def predict_sentence(
+    text_features: dict,
+    classifier: TrainedClassifier,
+) -> SentencePrediction:
+    """Predict whether a text contains errors. Uses max token P(error)."""
+    token_preds = predict_tokens(text_features, classifier)
+    max_p = max(tp.p_error for tp in token_preds) if token_preds else 0.0
+    return SentencePrediction(
+        has_errors=max_p >= classifier.sentence_threshold,
+        max_p_error=max_p,
+        token_predictions=token_preds,
     )
 
 
@@ -105,10 +217,10 @@ def predict(text_features: dict, classifier: TrainedClassifier) -> Prediction:
 @dataclass
 class Metrics:
     """Classification metrics from evaluating on test pairs."""
-    tp: int = 0  # error text correctly detected
-    fp: int = 0  # clean text wrongly flagged
-    tn: int = 0  # clean text correctly passed
-    fn: int = 0  # error text missed
+    tp: int = 0  # error sentence correctly detected
+    fp: int = 0  # clean sentence wrongly flagged
+    tn: int = 0  # clean sentence correctly passed
+    fn: int = 0  # error sentence missed
 
     @property
     def total(self) -> int:
@@ -156,8 +268,11 @@ class Metrics:
         }
 
 
-def evaluate(test_pair_features: list[dict], classifier: TrainedClassifier) -> Metrics:
-    """Evaluate classifier on test pairs.
+def evaluate(
+    test_pair_features: list[dict],
+    classifier: TrainedClassifier,
+) -> Metrics:
+    """Evaluate classifier on test pairs at sentence level.
 
     For each pair:
       - error text → should predict has_errors=True  (TP if correct, FN if missed)
@@ -165,13 +280,13 @@ def evaluate(test_pair_features: list[dict], classifier: TrainedClassifier) -> M
     """
     metrics = Metrics()
     for pf in test_pair_features:
-        error_pred = predict(pf["error"], classifier)
+        error_pred = predict_sentence(pf["error"], classifier)
         if error_pred.has_errors:
             metrics.tp += 1
         else:
             metrics.fn += 1
 
-        clean_pred = predict(pf["clean"], classifier)
+        clean_pred = predict_sentence(pf["clean"], classifier)
         if clean_pred.has_errors:
             metrics.fp += 1
         else:

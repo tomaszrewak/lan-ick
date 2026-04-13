@@ -7,13 +7,12 @@ Future experiment proposals, ordered roughly by priority/importance. Update this
 ### ~~Scale up synthetic data (100s–1000s of pairs)~~ ✓ Done (Experiment 1)
 Completed: 300 pairs, F1=70.1%. Features dropped from 204→41 (more selective). Bottleneck is now threshold/classifier.
 
-### Tune min_active_features threshold
-**Goal:** Sweep `min_active_features` from 1 to 20+ and plot precision/recall tradeoff. With 41 error features and threshold=1, FP rate is 85%. A higher threshold should dramatically improve precision while keeping recall high.
-**Importance:** Very high — likely the single biggest win available right now.
+### ~~Tune threshold + use activation magnitudes~~ ✓ Done (Experiment 2)
+Completed: Token-level LR with activation magnitudes + threshold sweep. F1=92.0% (up from 70.1%). Perfect recall at all thresholds.
 
-### Use activation magnitude, not just binary presence
-**Goal:** Instead of just checking whether an error feature fires (binary), use the activation strength. A logistic regression or simple weighted sum over feature activations could separate errors from clean much better than counting features.
-**Importance:** High — more principled than a hard threshold.
+### Explore higher thresholds and FP analysis
+**Goal:** Push threshold above 0.8 (0.85, 0.9, 0.95) since recall is still 100%. Inspect the 13 remaining FP sentences to understand what triggers false positives — unusual grammar? rare words?
+**Importance:** High — we may be able to reach F1>95% with no code changes.
 
 ### Word order swap and similar-word replacement errors
 **Goal:** Add non-character-level error types: word order swaps ("the went she to store") and similar-word substitution ("their" → "there", "affect" → "effect"). Test whether SAE features detect semantic/syntactic errors, not just character-level.

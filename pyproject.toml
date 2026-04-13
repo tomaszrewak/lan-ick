@@ -9,6 +9,7 @@ dependencies = [
     "einops>=0.8.2",
     "huggingface-hub>=1.10.1",
     "sae-lens>=6.39.0",
+    "scikit-learn>=1.8.0",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "transformers>=5.5.3",

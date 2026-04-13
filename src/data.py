@@ -1,7 +1,7 @@
 """Synthetic data generation for error detection experiments."""
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from datasets import load_dataset
 
@@ -11,6 +11,7 @@ class TextPair:
     """A clean/error text pair for comparison experiments."""
     clean: str
     error: str
+    error_word_indices: list[int] = field(default_factory=list)  # which words (by space-split index) were corrupted
 
 
 # --------------- Error injection ---------------
@@ -65,27 +66,34 @@ def corrupt_sentence(
     rng: random.Random,
     min_errors: int = 2,
     max_errors: int = 4,
-) -> str:
+) -> tuple[str, list[int]]:
     """Inject character-level errors into a sentence.
 
     Corrupts min_errors to max_errors words (chosen randomly).
     Only corrupts words of length >= 3 (skips short words like "a", "I", "to").
+
+    Returns:
+        (corrupted_text, list of corrupted word indices)
     """
     words = sentence.split()
     # Eligible word indices (len >= 3, alphabetic)
     eligible = [i for i, w in enumerate(words) if len(w) >= 3 and w.isalpha()]
 
     if not eligible:
-        return sentence
+        return sentence, []
 
     n_errors = rng.randint(min_errors, min(max_errors, len(eligible)))
     targets = rng.sample(eligible, n_errors)
 
+    actually_corrupted = []
     for idx in targets:
         fn = rng.choice(ERROR_FUNCTIONS)
-        words[idx] = fn(words[idx], rng)
+        new_word = fn(words[idx], rng)
+        if new_word != words[idx]:
+            words[idx] = new_word
+            actually_corrupted.append(idx)
 
-    return " ".join(words)
+    return " ".join(words), sorted(actually_corrupted)
 
 
 # --------------- Data generation ---------------
@@ -125,10 +133,10 @@ def generate_synthetic_pairs(
 
     pairs = []
     for clean in selected:
-        error = corrupt_sentence(clean, rng)
+        error, error_indices = corrupt_sentence(clean, rng)
         # Ensure the error text is actually different
         if error != clean:
-            pairs.append(TextPair(clean=clean, error=error))
+            pairs.append(TextPair(clean=clean, error=error, error_word_indices=error_indices))
 
     print(f"  Generated {len(pairs)} pairs ({len(selected) - len(pairs)} skipped — no change)")
     return pairs
@@ -173,6 +181,54 @@ def generate_test_pairs() -> list[TextPair]:
             error="Scientits discoverd an intresting patern in the data.",
         ),
     ]
+
+
+def token_to_word_index(text: str, str_tokens: list[str]) -> list[int | None]:
+    """Map each token position to its source word index (by space-split).
+
+    Returns a list of length len(str_tokens). Each entry is the word index
+    (0-based, by text.split()) that the token belongs to, or None for
+    special tokens / whitespace-only tokens that don't map to a word.
+    """
+    words = text.split()
+    # Build character ranges for each word
+    word_ranges: list[tuple[int, int]] = []  # (start_char, end_char) exclusive
+    pos = 0
+    for w in words:
+        start = text.index(w, pos)
+        word_ranges.append((start, start + len(w)))
+        pos = start + len(w)
+
+    # Walk through tokens, tracking character position in the original text
+    result: list[int | None] = []
+    char_pos = 0
+    for tok_str in str_tokens:
+        # Skip BOS / special tokens that aren't in the text
+        tok_text = tok_str  # decoded token string
+        # Find where this token maps in the original text
+        idx = text.find(tok_text, char_pos)
+        if idx == -1:
+            # Try stripping leading space (common in sentencepiece)
+            stripped = tok_text.lstrip()
+            idx = text.find(stripped, char_pos)
+            if idx != -1:
+                tok_text = stripped
+
+        if idx == -1:
+            result.append(None)
+            continue
+
+        # Find which word this character position falls in
+        tok_mid = idx + len(tok_text) // 2  # use midpoint for subword tokens
+        word_idx = None
+        for wi, (ws, we) in enumerate(word_ranges):
+            if ws <= tok_mid < we:
+                word_idx = wi
+                break
+        result.append(word_idx)
+        char_pos = idx + len(tok_text)
+
+    return result
 
 
 def split_train_test(

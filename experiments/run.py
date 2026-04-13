@@ -1,6 +1,7 @@
-"""Experiment 1: Scaled synthetic data with character-level errors.
+"""Experiment 2: Token-level logistic regression classifier.
 
-Flow: generate synthetic pairs → split train/test → extract features (cached) → train → evaluate.
+Flow: generate pairs → split → extract features (cached) → select features →
+      train token-level LR → sweep thresholds → evaluate → save results.
 """
 
 import json
@@ -9,7 +10,7 @@ from pathlib import Path
 from src.cache import cached, TEMP_DIR
 from src.data import generate_synthetic_pairs, split_train_test
 from src.model import extract_text_features
-from src.classifier import train, evaluate
+from src.classifier import select_features, train, evaluate
 
 # --------------- Experiment parameters ---------------
 
@@ -24,20 +25,22 @@ MIN_WORDS = 8
 MAX_WORDS = 20
 DATA_SEED = 42
 
-DATA_VERSION = "v2"           # bump when data generation changes
+THRESHOLDS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
+DATA_VERSION = "v3"           # bump when data generation changes (now with error_word_indices)
 EXTRACT_VERSION = "v1"        # bump when extract_text_features logic changes
 
 RESULTS_DIR = TEMP_DIR / "results"
 
-# Cache key for feature extraction encodes model parameters so
-# changing LAYERS or WIDTH auto-invalidates.
-EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
+# Feature extraction depends on text content, not data format.
+# Text content is identical to v2 (same seed), so reuse that cache.
+EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_v2_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w{WIDTH}"
 
 
 # --------------- Main ---------------
 
 def main():
-    # 1. Generate synthetic pairs
+    # 1. Generate synthetic pairs (v3 — with error_word_indices)
     all_pairs = cached(
         "synthetic_pairs", DATA_VERSION,
         lambda: generate_synthetic_pairs(N_PAIRS, MIN_WORDS, MAX_WORDS, DATA_SEED),
@@ -62,27 +65,56 @@ def main():
 
     train_features = [all_features[i] for i in train_idx]
     test_features = [all_features[i] for i in test_idx]
+    train_pairs = [all_pairs[i] for i in train_idx]
 
-    # 4. Train: find error-indicative features
-    classifier = train(train_features, LAYERS, min_pair_ratio=MIN_PAIR_RATIO)
-    print(f"\n{classifier.summary()}")
+    # 4. Select error-indicative features (same as Exp 1)
+    error_feats = select_features(train_features, LAYERS, min_pair_ratio=MIN_PAIR_RATIO)
+    total = sum(len(v) for v in error_feats.values())
+    print(f"\nSelected {total} error features:")
     for layer in LAYERS:
-        fids = sorted(classifier.error_features.get(layer, set()))
-        print(f"  Layer {layer}: {len(fids)} error features"
+        fids = sorted(error_feats.get(layer, set()))
+        print(f"  Layer {layer}: {len(fids)} features"
               + (f" (top: {fids[:5]}...)" if len(fids) > 5 else f" {fids}"))
 
-    # 5. Evaluate on held-out test pairs
-    metrics = evaluate(test_features, classifier)
-    print(f"\n{'='*60}")
-    print("TEST SET EVALUATION")
-    print(f"{'='*60}")
-    print(metrics.confusion_str())
-    print()
-    print(metrics.summary())
+    # 5. Train token-level logistic regression
+    print("\nTraining token-level classifier...")
+    classifier = train(train_features, train_pairs, LAYERS, error_feats)
+    print(f"{classifier.summary()}")
 
-    # 6. Save results
+    # 6. Sweep thresholds and evaluate
+    print(f"\n{'='*60}")
+    print("THRESHOLD SWEEP")
+    print(f"{'='*60}")
+
+    best_f1 = 0.0
+    best_threshold = 0.5
+    best_metrics = None
+    sweep_results = {}
+
+    for threshold in THRESHOLDS:
+        classifier.sentence_threshold = threshold
+        metrics = evaluate(test_features, classifier)
+        sweep_results[threshold] = metrics.to_dict()
+        marker = ""
+        if metrics.f1 > best_f1:
+            best_f1 = metrics.f1
+            best_threshold = threshold
+            best_metrics = metrics
+            marker = " ← best"
+        print(f"  threshold={threshold:.1f}: {metrics.summary()}{marker}")
+
+    # Show best result
+    classifier.sentence_threshold = best_threshold
+    print(f"\n{'='*60}")
+    print(f"BEST RESULT (threshold={best_threshold})")
+    print(f"{'='*60}")
+    print(best_metrics.confusion_str())
+    print()
+    print(best_metrics.summary())
+
+    # 7. Save results
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = RESULTS_DIR / "experiment_1_synthetic.json"
+    output_path = RESULTS_DIR / "experiment_2_token_lr.json"
 
     results = {
         "params": {
@@ -92,16 +124,17 @@ def main():
             "train_ratio": TRAIN_RATIO, "split_seed": SPLIT_SEED,
             "min_pair_ratio": MIN_PAIR_RATIO,
             "n_train": len(train_idx), "n_test": len(test_idx),
-            "train_indices": train_idx, "test_indices": test_idx,
         },
-        "classifier": {
-            "total_features": classifier.total_features,
+        "feature_selection": {
+            "total_features": total,
             "per_layer": {
-                layer: sorted(classifier.error_features.get(layer, set()))
+                layer: sorted(error_feats.get(layer, set()))
                 for layer in LAYERS
             },
         },
-        "metrics": metrics.to_dict(),
+        "threshold_sweep": {str(k): v for k, v in sweep_results.items()},
+        "best_threshold": best_threshold,
+        "best_metrics": best_metrics.to_dict(),
     }
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
