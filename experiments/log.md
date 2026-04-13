@@ -400,3 +400,36 @@ Training token counts: spelling dropped from 171→76 positive tokens (removed ~
 - **Conclusion:** Clear win. The causal attention insight is correct — labeling non-last tokens as errors was adding noise. This change should be permanent.
 
 **Commit:** 201630c
+
+---
+
+## Experiment 10: Next-token-after-word labeling
+
+**Date:** 2026-04-13T21:00:00+02:00
+
+**Goal:** Push the causal attention insight further. In Exp 9 we labeled the last token of an error word. But SentencePiece prepends whitespace to the *next* word's first token (e.g., `' about'` after `'ht'`). At the last token of the error word, the model doesn't yet know the word is finished — it could still be a prefix (e.g., "repla" could become "replacing"). Only at the next token (which starts with a space, confirming the word boundary) does the model have full context to "know" the previous word was wrong.
+
+**Hypothesis:** Labeling the first token AFTER the error word (instead of the last token OF the word) should produce cleaner signal. The model's "surprise" at seeing a space/new-word after an unexpected word ending is the strongest error indicator. Expect: further FP reduction, especially for spelling. Note: this shifts error attribution — a flagged token now means the *previous* word has an error.
+
+**Parameters:**
+- Same data: 300 pairs, 75/25 split, seed=42
+- Same layers: [7, 13, 17, 22], width 16k
+- Same feature selection: per-type, min_pair_ratio=0.3
+- Change: ALL tokens of error words excluded from training; first token after error word gets the error label
+- Edge case: error word is last word in sentence → skip (no next token to label)
+- Prediction unchanged: max P(error) across all tokens (sentence-level eval)
+
+**Results:** Worse than Exp 9 across all thresholds — FP rate increased significantly.
+
+| threshold | F1    | Precision | Recall | FP#  |
+|-----------|-------|-----------|--------|------|
+| 0.5       | 68.8% | 52.4%     | 100.0% | 68   |
+| 0.8       | 73.4% | 58.9%     | 97.3%  | 51   |
+| 0.9       | 74.2% | 64.1%     | 88.0%  | 37   |
+| 0.95      | 76.2% | 68.8%     | 85.3%  | 29   |
+
+Comparison at t=0.9: Exp 9 had F1=77.3%, P=71.6%, FP#=25. Exp 10: F1=74.2%, P=64.1%, FP#=37. Spelling FP went from 8%→20%.
+
+**Conclusion:** The "next token after error word" signal is noisier than the "last token of error word" signal. The last token of an error word has already seen all its characters and can detect something is wrong with the word itself. The next token's "surprise" at a word boundary doesn't encode as cleanly in SAE features — it's influenced by too many other factors (what the next word is, sentence structure, etc.). Reverted to Exp 9 approach (last-token labeling).
+
+**Commit:** 93cbf5c
