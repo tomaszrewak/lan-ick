@@ -13,8 +13,8 @@ class ErrorType(str, Enum):
     WORD_CHOICE = "word_choice"
     GRAMMAR = "grammar"
     WORD_ORDER = "word_order"
-    MISSING_WORD = "missing_word"
     EXTRA_WORD = "extra_word"
+    WTF = "wtf"
 
 
 @dataclass
@@ -333,43 +333,6 @@ def corrupt_word_order(sentence, rng):
 
 # --------------- Missing word errors ---------------
 
-# Function words whose deletion creates syntactic breakage
-_DELETABLE_FUNCTION_WORDS = {
-    # Articles
-    "a", "an", "the",
-    # Prepositions
-    "in", "on", "at", "of", "for", "to", "with", "by", "from", "about",
-    "into", "through", "during", "before", "after", "between", "under",
-    "over", "around", "against", "among", "without", "within",
-    # Auxiliaries
-    "is", "are", "was", "were", "has", "have", "had",
-    "do", "does", "did", "will", "would", "can", "could",
-    "should", "shall", "may", "might", "must",
-    # Conjunctions
-    "and", "but", "or", "so", "yet",
-    # Pronouns (subject)
-    "it", "he", "she", "we", "they",
-}
-
-
-def corrupt_missing_word(sentence, rng):
-    """Delete a function word from the sentence. Returns (text, labels) or None."""
-    words = sentence.split()
-    if len(words) < 6:
-        return None
-    eligible = [
-        i for i in range(1, len(words) - 1)
-        if words[i].lower().rstrip(".,!?;:") in _DELETABLE_FUNCTION_WORDS
-    ]
-    if not eligible:
-        return None
-    idx = rng.choice(eligible)
-    new_words = words[:idx] + words[idx + 1:]
-    # Label the word that shifted into the gap position
-    label_idx = min(idx, len(new_words) - 1)
-    labels = {label_idx: ErrorType.MISSING_WORD}
-    return " ".join(new_words), labels
-
 
 # --------------- Extra/duplicate word errors ---------------
 
@@ -387,6 +350,28 @@ def corrupt_extra_word(sentence, rng):
     return " ".join(new_words), labels
 
 
+# --------------- WTF / gibberish word errors ---------------
+
+def corrupt_wtf(sentence, rng, min_errors=1, max_errors=2):
+    """Replace words with random gibberish. Returns (text, labels) or None."""
+    words = sentence.split()
+    eligible = [i for i, w in enumerate(words) if len(w) >= 3 and w.isalpha()]
+    if not eligible:
+        return None
+    n_errors = rng.randint(min_errors, min(max_errors, len(eligible)))
+    targets = rng.sample(eligible, n_errors)
+    labels = {}
+    for idx in targets:
+        orig = words[idx]
+        length = rng.randint(max(3, len(orig) - 2), len(orig) + 3)
+        gibberish = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(length))
+        words[idx] = gibberish
+        labels[idx] = ErrorType.WTF
+    if not labels:
+        return None
+    return " ".join(words), labels
+
+
 # --------------- Corruption dispatch ---------------
 
 _CORRUPT_FUNCTIONS = {
@@ -394,8 +379,8 @@ _CORRUPT_FUNCTIONS = {
     ErrorType.WORD_CHOICE: corrupt_word_choice,
     ErrorType.GRAMMAR: corrupt_grammar,
     ErrorType.WORD_ORDER: corrupt_word_order,
-    ErrorType.MISSING_WORD: corrupt_missing_word,
     ErrorType.EXTRA_WORD: corrupt_extra_word,
+    ErrorType.WTF: corrupt_wtf,
 }
 
 
@@ -465,7 +450,8 @@ def token_to_word_index(text: str, str_tokens: list[str]) -> list[int | None]:
 
     Returns a list of length len(str_tokens). Each entry is the word index
     (0-based, by text.split()) that the token belongs to, or None for
-    special tokens / whitespace-only tokens that don't map to a word.
+    special tokens / whitespace-only tokens / punctuation-only tokens
+    that don't map to a word.
     """
     words = text.split()
     # Build character ranges for each word
@@ -493,6 +479,12 @@ def token_to_word_index(text: str, str_tokens: list[str]) -> list[int | None]:
 
         if idx == -1:
             result.append(None)
+            continue
+
+        # Skip punctuation-only tokens — they don't carry word-level signal
+        if not any(c.isalnum() for c in tok_text):
+            result.append(None)
+            char_pos = idx + len(tok_text)
             continue
 
         # Find which word this character position falls in

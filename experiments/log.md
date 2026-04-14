@@ -823,3 +823,76 @@ Best known config:
 **Decision:** Reverted all negative feature changes. The +1.2pp gain at N_neg=5 is too fragile (only works at exactly 5, collapses at 7+) and adds significant complexity (paired selection, PAIRED_ONLY_TYPES, per_type_neg_index). Kept the C and class_weight parameters in `train_ovr` as they're low-cost and useful for future experiments. The codebase at HEAD reflects the positive-only pipeline.
 
 **Commit:** be90446
+
+---
+
+## Experiment 16 — Drop missing_word, add "wtf" category, fix word boundaries
+
+**Date:** 2026-04-14
+
+**Goal:** Three improvements in one pass:
+1. **Drop `missing_word`** — threshold=1.0, 0% detection. Fundamentally not detectable at the word level with our approach.
+2. **Add `wtf` category** — completely random/gibberish words (e.g., "asdhgboat") are not detected as spelling errors. The LLM represents misspellings and unrecognizable gibberish differently in its activations, so we need a separate category.
+3. **Fix word boundary tokenization** — punctuation tokens (`.`, `,`) map to the preceding word in `token_to_word_index`, making the last token of "mat." be `"."` instead of `"mat"`. The classifier evaluates the wrong token for end-of-sentence words.
+
+**Hypothesis:**
+- Dropping missing_word frees up 100 data pairs for other types (5 types × 120 pairs each).
+- Gibberish words should produce very different SAE activations from normal text — expect high detection rate if the features exist.
+- Fixing punctuation boundaries will improve detection of errors in end-of-sentence words.
+
+**Parameters:** Same as Exp 13 baseline (layers [7,13,17,22], top-50, FP≤5%, 600 pairs), but with 5 types instead of 6, and new `wtf` type.
+
+### Round 1 — All three changes together
+
+Changes: (1) dropped `missing_word`, (2) added `wtf` gibberish category, (3) fixed `token_to_word_index` to exclude punctuation-only tokens from word mapping. Data version `v6`, extract version `v3`.
+
+**Results:**
+
+| Type | Thresh | Det | FP | (Exp 13 baseline) |
+|------|--------|-----|-----|-------------------|
+| spelling | 0.93 | 96% | 4.7% | 90%, 4.7% |
+| word_choice | 0.99 | 64% | 4.0% | 55%, 2.0% |
+| grammar | 0.98 | 70% | 4.7% | 74%, 4.7% |
+| word_order | 0.98 | 31% | 4.7% | 64%, 4.7% |
+| extra_word | 0.50 | 92% | 0.0% | 100%, 0.7% |
+| wtf | 0.50 | 100% | 4.0% | (new) |
+
+**Combined: F1=82.8%, P=82.2%, R=83.3%, FP#=27** (baseline: F1=81.6%, P=83.3%, R=80.0%, FP#=24)
+
+**Analysis:**
+- **wtf works perfectly.** 100% detection at t=0.50 (lowest possible). 834 feature candidates — the LLM clearly represents gibberish very differently from normal text and even spelling errors. Confirms the user's intuition.
+- **spelling: +6pp** (90% → 96%). Likely from the punctuation boundary fix — end-of-sentence misspellings now evaluated on the word token instead of `.`.
+- **word_choice: +9pp** (55% → 64%). Unexpected improvement. May be from data shift (different sentences in v6) or boundary fix affecting comma-attached words.
+- **word_order: -33pp** (64% → 31%). Massive collapse. At t=0.50, word_order detects 88% — the signal is there. But FP is 68% at t=0.50, requiring t=0.98 to stay under budget. The classifier can't separate unusual-but-correct word patterns from actual swaps. This is a data shift issue (different sentences from changed RNG path) making the threshold more restrictive (0.96 → 0.98).
+- **extra_word: -8pp** (100% → 92%). Slight decrease, still strong.
+- **FP# increased slightly** (24 → 27). The wtf category adds 4% FP on clean texts.
+
+### Round 2 — Seed variation analysis
+
+Investigated whether word_order collapse (64% → 31%) is systematic or data luck by running seeds 43 and 44 with the same code.
+
+| Seed | word_order | spelling | grammar | word_choice | extra_word | wtf | F1 |
+|------|-----------|----------|---------|-------------|------------|-----|-----|
+| 42 (v6) | 31% @ 0.98 | 96% @ 0.93 | 70% @ 0.98 | 64% @ 0.99 | 92% @ 0.50 | 100% @ 0.50 | 82.8% |
+| 43 (v6b) | 52% @ 0.99 | 80% @ 0.92 | 68% @ 0.99 | 48% @ 0.97 | 94% @ 0.50 | 93% @ 0.50 | 84.6% |
+| 44 (v6c) | 54% @ 0.99 | 83% @ 0.98 | 31% @ 1.00 | 64% @ 0.96 | 90% @ 0.50 | 96% @ 0.50 | 80.6% |
+
+**Key observations:**
+- **Word_order is consistently weak** (31-54% across seeds), down from 64% on v5. Not data luck.
+- **Massive per-type variance across seeds.** Grammar swings 31-70%, spelling 80-96%, word_choice 48-64%. With only 25 test pairs per type, this is expected (each pair = 4% swing).
+- **Combined F1 is more stable** (80.6-84.6%) because types partially compensate each other.
+- **wtf and extra_word are stable** — high detection at low thresholds across all seeds.
+- The punctuation fix likely accounts for some word_order drop — punctuation tokens previously leaked word-boundary context that helped. But the fix is correct (punctuation shouldn't be scored), so this is a real regression in our ability to detect word order, not an artifact.
+
+### Final conclusions (Experiment 16)
+
+1. **wtf category works perfectly** — 93-100% detection at t=0.50 across seeds. Gibberish produces very distinct SAE activations (834 candidates). Confirms the LLM represents spelling errors and gibberish very differently.
+2. **Punctuation fix is correct and important** — gives +6pp spelling improvement on seed 42 (end-of-sentence words now scored correctly). Improves overall pipeline correctness.
+3. **Word_order regression is real and systematic** — 31-54% across seeds vs 64% before. The punctuation fix removed leaked signal and the data regeneration (different RNG path) shifted which sentences get used. High variance (31-54%) indicates fundamental instability with 25 test pairs.
+4. **Per-type variance is too high at N=600 pairs.** Grammar swings 31-70% across seeds. Hyperparameter optimization on a single split is unreliable. Need larger datasets and/or cross-validation.
+5. **Combined metrics are acceptable:** F1=82.8%, slightly above the Exp 13 baseline of 81.6%.
+6. **Dropping missing_word was the right call** — freed data for other types and removed a category with 0% detection.
+
+Restored seed 42 as default. The codebase now has 6 types: spelling, word_choice, grammar, word_order, extra_word, wtf.
+
+**Commit:** b14e129

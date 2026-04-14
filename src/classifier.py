@@ -26,8 +26,8 @@ ERROR_TYPE_TO_LABEL = {
     ErrorType.WORD_CHOICE: 2,
     ErrorType.GRAMMAR: 3,
     ErrorType.WORD_ORDER: 4,
-    ErrorType.MISSING_WORD: 5,
-    ErrorType.EXTRA_WORD: 6,
+    ErrorType.EXTRA_WORD: 5,
+    ErrorType.WTF: 6,
 }
 LABEL_TO_ERROR_TYPE = {v: k for k, v in ERROR_TYPE_TO_LABEL.items()}
 

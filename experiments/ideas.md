@@ -51,12 +51,16 @@ Tested RF (100 trees, max_depth=8, balanced) as drop-in replacement for LR. RF p
 Broad negative selection failed badly (Round 1: F1 81.6→69.3%). Root cause: too many candidates (~9000 per type), selecting "common word" features. Diagnostic (Round 2): coefficient imbalance + class_weight="balanced" interaction. Fix (Round 3): paired negative selection (clean word at same position as error word) + only for paired types + only 5 features. Result: **F1=82.8%** (+1.2pp), modest but real improvement. The effect is fragile — only works at exactly N_neg=5. Best config: 50 positive + 5 paired negative features, balanced LR, C=1.0.
 
 ### K-fold cross-validation
-**Goal:** We use a single 75/25 split. With 25 test pairs per type at 600 pairs, a single pair swinging either way changes detection by 4%. Results may be noisy and we can't tell signal from variance. K-fold CV (e.g., 5-fold) would give mean ± std for all metrics and reveal if we're overfitting feature selection to the training split.
-**Importance:** Medium — critical for trusting results. Some past experiment "improvements" may have been noise.
+**Goal:** We use a single 75/25 split. With 25 test pairs per type at 600 pairs, a single pair swinging either way changes detection by 4%. Results may be noisy and we can't tell signal from variance. K-fold CV (e.g., 5-fold) would give mean ± std for all metrics and reveal if we're overfitting feature selection to the training split. Exp 16 confirmed this is critical — grammar swings 31-70% and word_order 31-54% across seeds.
+**Importance:** High — critical for trusting results. Per-type variance is too large to optimize hyperparameters on a single split.
 
 ### Scale to 6000+ pairs
-**Goal:** With 600 pairs, feature extraction takes ~20 min (cached, one-time). 6000 pairs would be ~3 hours but gives 1000 per type, ~750 training pairs per type, and much more stable feature selection and classifier training. Weak types (missing_word, word_order) are especially starved for data.
-**Importance:** Medium — straightforward scaling, but requires the feature selection and classifier improvements first to be worth the compute cost.
+**Goal:** With 600 pairs, feature extraction takes ~20 min (cached, one-time). 6000 pairs would be ~3 hours but gives 1000 per type, ~750 training pairs per type, and much more stable feature selection and classifier training. Weak types (word_order especially) are starved for data — word_order collapsed from 64% to 31% after data regeneration in Exp 16, showing high sensitivity to the specific sentence pool.
+**Importance:** High — straightforward scaling. Exp 16 showed per-type variance is too high at 600 pairs to reliably optimize.
+
+### Word_order: only label second swapped word
+**Goal:** Currently both swapped words get labeled as errors. The second word at the first position may or may not be wrong in context (depends on the preceding word). But the first word at the second position is *guaranteed* wrong — we enforce bad POS swap patterns. Labeling only the second word (the guaranteed error) would give the classifier cleaner training signal. The first swapped word just becomes an unlabeled token (excluded from training as a non-error word in an error sentence).
+**Importance:** Medium — may reduce noise in word_order training and help with the 31-54% detection instability.
 
 ### ~~Compare 16k vs 65k vs 262k SAE widths~~ ✓ Done (Experiment 8)
 Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 FPs at t=0.9). Feature counts similar across widths (~90 spelling, ~15 grammar). 65k found 0 features for missing_word. 262k extremely slow (per-layer eviction). **Conclusion: not worth the cost. Stick with 16k.**
@@ -79,9 +83,8 @@ Extended Exp 9's last-token-only training to also cover clean text training toke
 **Goal:** Map exactly where error-detection signal emerges and peaks. Current experiment samples 5 layers; a full sweep would reveal the optimal layer(s) to use for the final classifier.
 **Importance:** High — needed to decide which layer(s) to bake into the fused model.
 
-### Missing word: label sentence-end punctuation instead of next word
-**Goal:** For missing_word errors, the current approach labels the word after the gap — but that word is valid, just in a surprising position. The signal may be too diffuse. Alternative: only generate missing_word errors in positions where the gap is followed by sentence-end punctuation, and label the punctuation token. By the end of the sentence, the model has full context to "know" a function word was missing somewhere. This shifts from local detection to sentence-level detection for this type only.
-**Importance:** Low — missing_word is the weakest type (28% det, 1 feature) and may be fundamentally hard for SAEs. Worth trying but not critical.
+### ~~Missing word: label sentence-end punctuation instead of next word~~ — Category dropped (Experiment 16)
+The `missing_word` category was removed entirely — 0% detection with threshold=1.0. The category is fundamentally not detectable at the word level with SAEs: the gap is a structural issue, not a token-level anomaly.
 
 ### ~~Separate spelling errors from grammar errors~~ ✓ Done (Experiment 4)
 Completed: Spelling is 100% detected and classified. Grammar is detected (90%) but misclassified 78% of the time — features overlap with word_choice and word_order. Low detection types (missing_word: 67%) are kept as-is; when they fire correctly it's useful, the priority is keeping FP low rather than maximizing recall.
