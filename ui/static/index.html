@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Lan-ick Error Detector</title>
+  <style>
+    body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    textarea { width: 100%; height: 120px; font-size: 16px; font-family: inherit; }
+    #status { color: #888; margin: 8px 0; }
+    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+    th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+    th { background: #f5f5f5; }
+    .error { background: #ffe0e0; }
+    .clean { background: #e8f5e9; }
+  </style>
+</head>
+<body>
+  <h1>Lan-ick Error Detector</h1>
+  <textarea id="input" placeholder="Type or paste text here..."></textarea>
+  <div id="status">Ready</div>
+  <table id="results" hidden>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Word</th>
+        <th>spelling</th>
+        <th>word_choice</th>
+        <th>grammar</th>
+        <th>word_order</th>
+        <th>missing_word</th>
+        <th>extra_word</th>
+      </tr>
+    </thead>
+    <tbody id="results-body"></tbody>
+  </table>
+  <script>
+    const ERROR_TYPES = ['spelling', 'word_choice', 'grammar', 'word_order', 'missing_word', 'extra_word'];
+    const input = document.getElementById('input');
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+    const tbody = document.getElementById('results-body');
+
+    let timer = null;
+    let inflight = null;
+
+    input.addEventListener('input', () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(sendCheck, 500);
+    });
+
+    async function sendCheck() {
+      const text = input.value.trim();
+      if (!text) {
+        results.hidden = true;
+        status.textContent = 'Ready';
+        return;
+      }
+
+      if (inflight) inflight.abort();
+      const controller = new AbortController();
+      inflight = controller;
+
+      status.textContent = 'Checking...';
+      try {
+        const resp = await fetch('/api/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+          signal: controller.signal,
+        });
+        const data = await resp.json();
+        if (data.error) {
+          status.textContent = 'Error: ' + data.error;
+          return;
+        }
+        renderResults(data.words);
+        status.textContent = `Checked ${data.words.length} words`;
+      } catch (e) {
+        if (e.name !== 'AbortError') {
+          status.textContent = 'Error: ' + e.message;
+        }
+      } finally {
+        if (inflight === controller) inflight = null;
+      }
+    }
+
+    function renderResults(words) {
+      tbody.innerHTML = '';
+      results.hidden = false;
+      words.forEach((w, i) => {
+        const tr = document.createElement('tr');
+        const hasError = Object.keys(w.errors).length > 0;
+        tr.className = hasError ? 'error' : 'clean';
+        tr.innerHTML = `<td>${i + 1}</td><td>${esc(w.word)}</td>` +
+          ERROR_TYPES.map(et => {
+            const p = w.errors[et];
+            return `<td>${p !== undefined ? p.toFixed(3) : ''}</td>`;
+          }).join('');
+        tbody.appendChild(tr);
+      });
+    }
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>
