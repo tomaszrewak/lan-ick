@@ -896,3 +896,71 @@ Investigated whether word_order collapse (64% → 31%) is systematic or data luc
 Restored seed 42 as default. The codebase now has 6 types: spelling, word_choice, grammar, word_order, extra_word, wtf.
 
 **Commit:** b14e129
+
+---
+
+## Experiment 17 — K-fold cross-validation
+
+**Date:** 2026-04-14
+
+**Goal:** Replace the single 75/25 split with 5-fold CV to get reliable mean ± std metrics. Exp 16 showed per-type detection swings wildly across seeds (grammar 31-70%, word_order 31-54%), making single-split evaluation untrustworthy. K-fold will reveal true performance and variance.
+
+**Hypothesis:** Combined F1 will be similar to the single-split result (~82%), but individual type detection rates will have high std (±10-15pp for weak types like word_order, lower for strong types like spelling). This will establish trustworthy baselines for future experiments.
+
+**Parameters:** Same pipeline (layers [7,13,17,22], top-50, FP≤5%, 600 pairs v6). 5 folds, feature selection + training + thresholds computed independently per fold.
+
+### Results
+
+Per-fold results:
+
+| Type | Fold 1 | Fold 2 | Fold 3 | Fold 4 | Fold 5 |
+|------|--------|--------|--------|--------|--------|
+| spelling | 78% @ 0.99 | 95% @ 0.86 | 100% @ 0.91 | 88% @ 0.94 | 96% @ 0.89 |
+| word_choice | 12% @ 1.00 | 74% @ 0.92 | 58% @ 0.95 | 5% @ 1.00 | 61% @ 0.99 |
+| grammar | 59% @ 0.99 | 50% @ 0.98 | 76% @ 0.97 | 80% @ 0.98 | 62% @ 0.99 |
+| word_order | 39% @ 0.96 | 25% @ 0.99 | 52% @ 0.98 | 0% @ 1.00 | 30% @ 0.98 |
+| extra_word | 91% @ 0.50 | 87% @ 0.50 | 100% @ 0.50 | 95% @ 0.50 | 95% @ 0.50 |
+| wtf | 88% @ 0.50 | 100% @ 0.50 | 96% @ 0.50 | 91% @ 0.50 | 100% @ 0.50 |
+| **F1** | 78.1% | 79.3% | 83.6% | 76.5% | 80.7% |
+
+5-fold CV summary:
+
+| Type | Det mean | Det std | Thresh mean | FP mean |
+|------|----------|---------|-------------|---------|
+| spelling | 91.4% | ±7.6% | 0.92 | 5.0% |
+| word_choice | 42.0% | ±27.8% | 0.97 | 3.0% |
+| grammar | 65.5% | ±11.1% | 0.98 | 4.7% |
+| word_order | 29.3% | ±17.3% | 0.98 | 3.0% |
+| extra_word | 93.7% | ±4.5% | 0.50 | 0.7% |
+| wtf | 94.9% | ±4.9% | 0.50 | 2.3% |
+
+**Combined: F1=79.6% ±2.4%, P=82.7% ±1.5%, R=77.0% ±5.3%, FP#=19.4 ±2.9**
+
+### Analysis
+
+**Three tiers of reliability:**
+1. **Rock solid** (std ≤5%): extra_word (93.7% ±4.5%), wtf (94.9% ±4.9%). These are essentially solved — the SAE activations for duplicated words and gibberish are so distinct that even different train/test splits barely matter. Thresholds always at 0.50 (lowest possible).
+2. **Reasonable** (std ~8-11%): spelling (91.4% ±7.6%), grammar (65.5% ±11.1%). Some fold-to-fold variance but the signal is real. Spelling is reliably strong. Grammar is moderate and stable.
+3. **Unreliable** (std ≥17%): word_choice (42.0% ±27.8%), word_order (29.3% ±17.3%). Catastrophic variance. Word_choice swings 5-74%, word_order 0-52%. Fold 4 hits 0% word_order and 5% word_choice — the classifier essentially fails on these types for certain splits.
+
+**What the variance tells us:**
+- **word_choice** at ±27.8% is the worst. The confusable-word swaps (their→there, etc.) produce weak SAE signal — the model doesn't strongly distinguish homophones in its activations. When the specific test pairs happen to include the few "easy" confusables, detection is high; otherwise it collapses. Threshold often hits 1.00 (no detections at all).
+- **word_order** at ±17.3% with mean 29.3% is similarly weak. The threshold is consistently high (0.96-1.00) — there's too much FP pressure at lower thresholds, so we have to cut aggressively.  
+- **Combined F1 is 79.6% ±2.4%** — decently stable. Our single-split result of 82.8% was slightly optimistic (in the upper range).
+- **The previous Exp 13 baseline of 81.6%** also appears to have been a favorable split. The true performance is ~80%.
+- **FP count is well-controlled**: 19.4 ±2.9, always under budget.
+
+**Implication for past experiments:**
+- The +1.2pp F1 improvement from Exp 15 (negative features) was within noise (±2.4%). Correct to have reverted.
+- The Exp 16 "word_order collapse" from 64% to 31% was within the ±17% std band — it wasn't as dramatic as it looked, just normal variance.
+
+### Conclusions
+
+1. **True baseline: F1=79.6% ±2.4%.** Previous single-split results (~81-83%) were slightly optimistic.
+2. **spelling, extra_word, wtf are reliably strong.** These types are effectively solved for our current approach.
+3. **word_choice and word_order are unreliable.** Variance is too high to meaningfully optimize. Need fundamentally better features or much more data for these types.
+4. **grammar is in the middle** — real signal but room for improvement.
+5. **K-fold CV is now the standard evaluation method.** Future experiments must report mean ± std to claim improvement.
+6. **An improvement must exceed ±2.4% F1** (ideally 2× std = ~5pp) to be considered real.
+
+**Commit:** ccfe466

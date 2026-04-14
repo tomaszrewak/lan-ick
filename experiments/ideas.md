@@ -50,9 +50,8 @@ Tested RF (100 trees, max_depth=8, balanced) as drop-in replacement for LR. RF p
 ### ~~Negative-example features (clean-only activation counterweight)~~ ✓ Done (Experiment 15)
 Broad negative selection failed badly (Round 1: F1 81.6→69.3%). Root cause: too many candidates (~9000 per type), selecting "common word" features. Diagnostic (Round 2): coefficient imbalance + class_weight="balanced" interaction. Fix (Round 3): paired negative selection (clean word at same position as error word) + only for paired types + only 5 features. Result: **F1=82.8%** (+1.2pp), modest but real improvement. The effect is fragile — only works at exactly N_neg=5. Best config: 50 positive + 5 paired negative features, balanced LR, C=1.0.
 
-### K-fold cross-validation
-**Goal:** We use a single 75/25 split. With 25 test pairs per type at 600 pairs, a single pair swinging either way changes detection by 4%. Results may be noisy and we can't tell signal from variance. K-fold CV (e.g., 5-fold) would give mean ± std for all metrics and reveal if we're overfitting feature selection to the training split. Exp 16 confirmed this is critical — grammar swings 31-70% and word_order 31-54% across seeds.
-**Importance:** High — critical for trusting results. Per-type variance is too large to optimize hyperparameters on a single split.
+### ~~K-fold cross-validation~~ ✓ Done (Experiment 17)
+Completed: 5-fold CV. True baseline: F1=79.6% ±2.4%. Revealed three tiers: rock solid (extra_word 93.7% ±4.5%, wtf 94.9% ±4.9%), reasonable (spelling 91.4% ±7.6%, grammar 65.5% ±11.1%), unreliable (word_choice 42.0% ±27.8%, word_order 29.3% ±17.3%). Previous single-split results were slightly optimistic. Future experiments must report mean ± std.
 
 ### Scale to 6000+ pairs
 **Goal:** With 600 pairs, feature extraction takes ~20 min (cached, one-time). 6000 pairs would be ~3 hours but gives 1000 per type, ~750 training pairs per type, and much more stable feature selection and classifier training. Weak types (word_order especially) are starved for data — word_order collapsed from 64% to 31% after data regeneration in Exp 16, showing high sensitivity to the specific sentence pool.
@@ -88,6 +87,10 @@ The `missing_word` category was removed entirely — 0% detection with threshold
 
 ### ~~Separate spelling errors from grammar errors~~ ✓ Done (Experiment 4)
 Completed: Spelling is 100% detected and classified. Grammar is detected (90%) but misclassified 78% of the time — features overlap with word_choice and word_order. Low detection types (missing_word: 67%) are kept as-is; when they fire correctly it's useful, the priority is keeping FP low rather than maximizing recall.
+
+### Treat punctuation as separate words (tokenization + training)
+**Goal:** Currently punctuation attached to words (e.g., "mat.") stays as one word via `text.split()`, and standalone punctuation tokens map to `None` (excluded from scoring/training). Instead, split punctuation into separate word entries — both in `token_to_word_index` and the UI. This enables future punctuation error categories (missing/excessive commas, periods, etc.) and makes the word-level output more granular.
+**Importance:** Medium — prerequisite for punctuation error detection. No urgency until we add punctuation error types.
 
 ### Test on real-world text (not synthetic)
 **Goal:** Run the classifier on naturally occurring errors (e.g., from typo corpora, student essays, social media). Synthetic errors may not represent the distribution the model saw during training.

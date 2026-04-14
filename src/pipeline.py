@@ -27,20 +27,17 @@ TOP_N = 50
 FP_BUDGET = 0.05
 
 
-# --------------- Build classifier ---------------
+# --------------- Load data ---------------
 
-def build_classifier() -> OVRClassifier:
-    """Load cached data, select features, train OVR, compute thresholds.
+def load_data():
+    """Load pairs and features from cache (or generate/extract if needed).
 
-    Returns a ready-to-use OVRClassifier with per-type thresholds set.
+    Returns (all_pairs, all_features).
     """
     all_pairs = cached(
         "synthetic_pairs", DATA_VERSION,
         lambda: generate_synthetic_pairs(N_PAIRS, MIN_WORDS, MAX_WORDS, DATA_SEED),
     )
-    train_idx, test_idx = split_train_test(all_pairs, TRAIN_RATIO, SPLIT_SEED)
-    train_pairs = [all_pairs[i] for i in train_idx]
-    test_pairs = [all_pairs[i] for i in test_idx]
 
     def extract_all():
         results = []
@@ -52,6 +49,20 @@ def build_classifier() -> OVRClassifier:
         return results
 
     all_features = cached("pair_features", EXTRACT_CACHE_KEY, extract_all)
+    return all_pairs, all_features
+
+
+# --------------- Build classifier ---------------
+
+def build_classifier() -> OVRClassifier:
+    """Load cached data, select features, train OVR, compute thresholds.
+
+    Returns a ready-to-use OVRClassifier with per-type thresholds set.
+    """
+    all_pairs, all_features = load_data()
+    train_idx, test_idx = split_train_test(all_pairs, TRAIN_RATIO, SPLIT_SEED)
+    train_pairs = [all_pairs[i] for i in train_idx]
+    test_pairs = [all_pairs[i] for i in test_idx]
     train_features = [all_features[i] for i in train_idx]
     test_features = [all_features[i] for i in test_idx]
 
