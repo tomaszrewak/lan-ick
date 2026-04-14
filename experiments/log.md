@@ -964,3 +964,55 @@ Per-fold results:
 6. **An improvement must exceed ±2.4% F1** (ideally 2× std = ~5pp) to be considered real.
 
 **Commit:** ccfe466
+
+---
+
+## Experiment 18: Data quality improvements for grammar and word_order
+
+**Date:** 2026-04-14T12:00:00+02:00
+
+**Goal:** Two targeted data quality fixes addressing known root causes of weak detection:
+1. **Grammar swap diversity**: Currently 33/100 grammar pairs have "are" as the error word (all from `is→are` swaps), causing the classifier to learn "are" itself as a grammar indicator rather than context-dependent signal. Fix: expand GRAMMAR_SWAPS with more diverse entries (auxiliaries, modals, article errors) and cap per-key usage at 5 to prevent any single swap from dominating.
+2. **Word_order single-word labeling**: Currently both swapped words are labeled as errors, but only the displaced word (at position idx+1) is *guaranteed* wrong by the swap pattern. The word at position idx may or may not be contextually wrong. Fix: only label idx+1 to give the classifier cleaner training signal.
+
+**Hypothesis:** Grammar detection (65.5% ±11.1%) should improve in both detection rate and FP behavior as the classifier learns context-dependent grammar features instead of "are = grammar error". Word_order (29.3% ±17.3%) may improve with cleaner labels — the classifier currently has to find signal at two positions when only one is reliable.
+
+**Parameters:**
+- Same as Exp 17 baseline: layers=[7,13,17,22], 16k SAE, 600 pairs, 5-fold CV
+- Data version: v6 → v7 (new GRAMMAR_SWAPS + cap at 5 per key, single-word word_order labels)
+- New GRAMMAR_SWAPS additions: am↔is, will↔would, can↔could, shall↔should, may↔might, much↔many, good↔well, bad↔badly, a↔an
+- Grammar max_per_key: 5
+
+### Results (Round 1)
+
+| Type | Exp 17 baseline | Exp 18 | Change |
+|------|----------------|--------|--------|
+| spelling | 91.4% ±7.6% | 87.5% ±4.9% | -3.9pp |
+| word_choice | 42.0% ±27.8% | 44.1% ±16.8% | +2.1pp |
+| grammar | 65.5% ±11.1% | **17.5% ±22.2%** | **-48pp** |
+| word_order | 29.3% ±17.3% | 10.6% ±21.2% | -18.7pp |
+| extra_word | 93.7% ±4.5% | 90.7% ±2.3% | -3.0pp |
+| wtf | 94.9% ±4.9% | 92.8% ±2.4% | -2.1pp |
+| **Combined F1** | **79.6% ±2.4%** | **75.5% ±3.4%** | **-4.1pp** |
+
+**Combined: F1=75.5% ±3.4%, P=83.7% ±1.2%, R=69.0% ±5.4%, FP#=16.2 ±2.0**
+
+### Analysis
+
+**Both changes backfired.**
+
+1. **Grammar collapsed catastrophically** (65.5% → 17.5%): The swap diversity + per-key cap at 5 diluted the training signal beyond recovery. Grammar thresholds hit 1.00 in 3 of 5 folds (= zero detections). With cap=5, each individual swap key appears too rarely for the classifier to learn from ~87 positive training tokens spread across ~50 different swap keys. The old "is→are"-dominated approach actually *worked* because it provided a consistent, learnable pattern — the classifier detected "are in wrong context" reliably even if the underlying feature was "are-specific" rather than "grammar-general."
+
+2. **Word_order also worsened** (29.3% → 10.6%): Single-word labeling (only idx+1) halved the positive training tokens from ~150 to ~75 for an already-marginal type. The signal, which was barely learnable with two labeled words, became unlearnable with one. Threshold stuck at 1.00 in 4 of 5 folds.
+
+3. **Even strong types regressed slightly**: spelling 91.4%→87.5%, extra_word 93.7%→90.7%, wtf 94.9%→92.8%. This is likely due to the regenerated data (v7) producing different sentence/error distributions rather than a direct effect of the grammar/word_order changes.
+
+**Key insight:** At 100 pairs per type (~80-90 positive training tokens), **consistency beats diversity**. Theoretical improvements to training signal quality are gated on data volume — the current dataset is too small for the classifier to learn from diverse patterns. The "is→are" bias is a symptom of small data, but removing it without adding data just removes the signal entirely.
+
+### Conclusions
+
+1. **Failed experiment. Reverting all changes.** The -4.1pp F1 regression exceeds the 2× std threshold for a real effect.
+2. **Data diversity improvements must be paired with data scaling.** Grammar swap diversity and word_order single-label are sound ideas that need ≥1000 pairs per type to work. Added to ideas.md as a prerequisite for the "scale to 6000+ pairs" idea.
+3. **The "are" bias is load-bearing at current scale.** Counterintuitive but true: the classifier's grammar detection works *because* 33% of grammar errors are "is→are", not despite it.
+
+**Commit:** 61b3f29
