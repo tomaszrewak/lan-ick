@@ -14,7 +14,7 @@ from src.classifier import (
 # --------------- Default parameters ---------------
 
 LAYERS = [7, 13, 17, 22]
-N_PAIRS = 600
+N_PAIRS = 6000
 MIN_WORDS = 8
 MAX_WORDS = 20
 DATA_SEED = 42
@@ -22,8 +22,9 @@ TRAIN_RATIO = 0.75
 SPLIT_SEED = 42
 DATA_VERSION = "v6"
 EXTRACT_VERSION = "v3"
+DATA_CACHE_KEY = f"{DATA_VERSION}_n{N_PAIRS}"
 EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w16k"
-TOP_N = 50
+TOP_N = 100
 FP_BUDGET = 0.05
 
 
@@ -35,7 +36,7 @@ def load_data():
     Returns (all_pairs, all_features).
     """
     all_pairs = cached(
-        "synthetic_pairs", DATA_VERSION,
+        "synthetic_pairs", DATA_CACHE_KEY,
         lambda: generate_synthetic_pairs(N_PAIRS, MIN_WORDS, MAX_WORDS, DATA_SEED),
     )
 

@@ -1107,3 +1107,77 @@ The initial hypothesis was entirely wrong — the forward pass (the only thing t
 The fix is simple, lossless, and permanent. Scaling to 6000+ pairs is now practical.
 
 **Commit:** 8762562
+
+---
+
+## Experiment 20: Scale to 6000 pairs
+
+**Date:** 2026-04-15T16:00:00+02:00
+
+**Goal:** Scale synthetic data from 600 pairs (100/type) to 6000 pairs (1000/type). This is a straightforward 10x increase enabled by Exp 19's extraction speedup (~8 min for 12,000 texts). More training data should improve weak types (word_order 29.3%, word_choice 42.0%) and reduce per-fold variance.
+
+**Hypothesis:** F1 improves from 79.6% → 82-85%, driven by word_order and word_choice. Variance (±2.4%) should shrink to ±1%. Strong types (extra_word, wtf, spelling) should hold or improve slightly.
+
+**Parameters:**
+- N_PAIRS: 6000 (was 600)
+- 5-fold CV, same as Exp 17 baseline
+- All else unchanged: layers [7,13,17,22], top-50 features, 5% FP budget, 16k SAEs
+
+**Note:** First run loaded stale `synthetic_pairs__v7.pkl` from Exp 18 (only 600 pairs) because `N_PAIRS` wasn't in the data cache key. Fixed by adding `DATA_CACHE_KEY = f"{DATA_VERSION}_n{N_PAIRS}"`. Also reverted DATA_VERSION to "v6" (the data generation logic hasn't changed).
+
+### Round 1: 6000 pairs with top_n=50 (baseline comparison)
+
+| Metric | Exp 17 (600 pairs) | Exp 20 (6000 pairs) | Delta |
+|--------|-------------------|---------------------|-------|
+| **F1** | 79.6% ± 2.4% | **83.5% ± 1.1%** | **+3.9pp**, variance halved |
+| Precision | 82.7% ± 1.5% | 82.2% ± 0.9% | -0.5pp |
+| Recall | 77.0% ± 5.3% | 84.9% ± 1.6% | +7.9pp |
+
+Per-type detection rates:
+
+| Type | 600 pairs | 6000 pairs | Delta |
+|------|-----------|------------|-------|
+| spelling | 91.4% ± 7.6% | 91.1% ± 1.0% | held, variance 7.6x smaller |
+| word_choice | 42.0% ± 27.8% | 57.2% ± 5.6% | +15.2pp |
+| grammar | 65.5% ± 11.1% | 73.5% ± 3.2% | +8.0pp |
+| **word_order** | 29.3% ± 17.3% | **55.8% ± 3.4%** | **+26.5pp** |
+| extra_word | 93.7% ± 4.5% | 98.9% ± 1.0% | +5.2pp |
+| wtf | 94.9% ± 4.9% | 98.7% ± 1.0% | +3.8pp |
+
+Every type improved. Variance collapsed everywhere. Feature candidate pools exploded (word_order: 352 → 5882). With 1500 positive training tokens per type (was ~80), the classifier has room for more features.
+
+### Round 2: top_N sweep (50, 100, 150, 200)
+
+At 600 pairs, top_n=100 collapsed word_order to 0% (data starvation: ~80 tokens / 100 features). At 6000 pairs with ~1500 tokens/type, higher top_N should now work.
+
+| top_N | F1 | P | R | FP# | spelling | word_choice | grammar | word_order | extra_word | wtf |
+|-------|------|------|------|-----|------|------|------|------|------|------|
+| 50 | 83.5% ±1.1% | 82.2% | 84.9% | 220 | 91.1% | 57.2% | 73.5% | 55.8% | 98.9% | 98.7% |
+| **100** | **84.6% ±0.6%** | 82.4% | **87.0%** | 224 | **93.4%** | **67.6%** | **77.4%** | **58.8%** | 96.4% | 98.4% |
+| 150 | 84.7% ±0.5% | 83.2% | 86.3% | 209 | 93.1% | 69.3% | 76.6% | 57.8% | 94.4% | 98.5% |
+| 200 | 85.0% ±0.6% | 83.3% | 86.7% | 209 | 93.0% | 71.0% | 78.4% | 57.9% | 94.7% | 98.1% |
+
+top_N=100 is the clear knee:
+- +1.1pp F1, +10.4pp word_choice, +3.9pp grammar, +3pp word_order, +2.3pp spelling vs top_N=50
+- Beyond 100: diminishing returns (+0.1-0.4pp F1 per step), extra_word degrades (98.9→94.4%)
+- Variance tightens: ±1.1% → ±0.6%
+
+Selected **top_N=100** as new default.
+
+### Results summary
+
+**Best configuration: 6000 pairs, top_N=100**
+- F1: **84.6% ± 0.6%** (was 79.6% ± 2.4%, **+5.0pp**)
+- Precision: 82.4% ± 0.3%
+- Recall: 87.0% ± 1.1%
+- Per-fold: [85.0%, 84.3%, 84.1%, 85.6%, 84.0%] — remarkably stable
+
+### Conclusions
+
+1. **10x data scaling works.** Every type improved, variance collapsed. The biggest winner is word_order (+29.5pp from Exp 17 baseline).
+2. **top_N scaling also works.** At 600 pairs, top_N>50 overfitted. At 6000 pairs, top_N=100 is a free +1.1pp F1. The data starvation bottleneck that limited Exp 13's top-N sweep is gone.
+3. **FP rate held.** Per-type FP rates stayed within the 5% budget. The combined FP rate (any type flagged) is ~18.6%, but this is driven by stacking 6 independent type classifiers; individual rates are controlled.
+4. **Remaining weak types:** word_choice (67.6%) and word_order (58.8%) still lag. Both have enormous feature candidate pools (4000+, 5800+) but plateau around top_N=100-200. The limitation may be in the feature quality (position-aware selection criteria) or the error types themselves, not data quantity.
+5. **Feature extraction at 6000 pairs took ~9 minutes** (one-time, cached), confirming Exp 19's speedup estimate.
+
+**Commit:** d376138

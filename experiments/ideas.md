@@ -53,9 +53,8 @@ Broad negative selection failed badly (Round 1: F1 81.6→69.3%). Root cause: to
 ### ~~K-fold cross-validation~~ ✓ Done (Experiment 17)
 Completed: 5-fold CV. True baseline: F1=79.6% ±2.4%. Revealed three tiers: rock solid (extra_word 93.7% ±4.5%, wtf 94.9% ±4.9%), reasonable (spelling 91.4% ±7.6%, grammar 65.5% ±11.1%), unreliable (word_choice 42.0% ±27.8%, word_order 29.3% ±17.3%). Previous single-split results were slightly optimistic. Future experiments must report mean ± std.
 
-### Scale to 6000+ pairs
-**Goal:** With 600 pairs, feature extraction takes ~50s (cached, one-time). 6000 pairs would be ~8 minutes thanks to the vectorized extraction from Exp 19 (was ~2 hours before), giving 1000 per type, ~750 training pairs per type, and much more stable feature selection and classifier training. Weak types (word_order especially) are starved for data — word_order collapsed from 64% to 31% after data regeneration in Exp 16, showing high sensitivity to the specific sentence pool.
-**Importance:** High — straightforward scaling. Exp 16 showed per-type variance is too high at 600 pairs to reliably optimize. **Exp 18 confirmed: data diversity improvements (grammar swap diversity, word_order single-label) are gated on data scale.** At 100 pairs/type, consistency beats diversity. Scale up first, then re-apply diversity fixes.
+### ~~Scale to 6000+ pairs~~ ✓ Done (Experiment 20)
+Completed: 6000 pairs (1000/type), extraction ~9 min (thanks to Exp 19 vectorization). F1: 79.6% → 84.6% (+5.0pp), variance halved (±2.4% → ±0.6%). word_order nearly doubled (29.3% → 58.8%), word_choice +25.6pp (42.0% → 67.6%). Also re-validated top_N sweep: top_N=100 now works (was overfitting at 600 pairs), giving +1.1pp F1 over top_N=50.
 
 ### ~~Word_order: only label second swapped word~~ ✗ Failed at current scale (Experiment 18)
 Tested labeling only the displaced word (idx+1) instead of both swapped words. Result: word_order detection 29.3% → 10.6%. Halving positive training tokens (~150 → ~75) killed the already-marginal signal. **Prerequisite: scale to ≥1000 pairs/type first, then retry.**
@@ -64,8 +63,8 @@ Tested labeling only the displaced word (idx+1) instead of both swapped words. R
 Added 18 new GRAMMAR_SWAPS entries (auxiliaries, modals, articles, adj/adv confusion) + capped per-key usage at 5. Result: grammar detection catastrophically collapsed 65.5% → 17.5%. Signal too diluted across ~50 swap keys with only ~87 positive tokens. The "is→are" dominance is load-bearing at 100 pairs/type. **Prerequisite: scale to ≥1000 pairs/type first, then retry.**
 
 ### Retry data quality fixes after scaling (grammar diversity + word_order single-label)
-**Goal:** Re-apply the Exp 18 changes — diversified GRAMMAR_SWAPS with per-key cap and word_order single-word labeling — once we have ≥1000 pairs per type. Both changes are theoretically sound but need more training tokens to compensate for signal dilution ([Exp 18](../experiments/log.md) showed consistency beats diversity at 100 pairs/type). Grammar needs enough examples per swap key for the classifier to learn context patterns, and word_order needs enough single-labeled tokens to overcome the halved positive count.
-**Importance:** Medium — blocked on "Scale to 6000+ pairs". Do immediately after that experiment.
+**Goal:** Re-apply the Exp 18 changes — diversified GRAMMAR_SWAPS with per-key cap and word_order single-word labeling — now that we have 1000 pairs per type (Exp 20). Both changes are theoretically sound and previously failed only due to data starvation at 100 pairs/type. Grammar needs enough examples per swap key for the classifier to learn context patterns, and word_order needs enough single-labeled tokens to overcome the halved positive count.
+**Importance:** High — now unblocked. Exp 20 showed word_order (58.8%) and grammar (77.4%) still have headroom.
 
 ### ~~Compare 16k vs 65k vs 262k SAE widths~~ ✓ Done (Experiment 8)
 Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 FPs at t=0.9). Feature counts similar across widths (~90 spelling, ~15 grammar). 65k found 0 features for missing_word. 262k extremely slow (per-layer eviction). **Conclusion: not worth the cost. Stick with 16k.**
@@ -83,7 +82,7 @@ Tested labeling the first token *after* the error word (instead of the last toke
 
 ### Word_choice: use next-word activations (look-ahead context)
 **Goal:** For word_choice errors specifically, the "wrongness" of a confusable word (their→there) may only become apparent from the *following* context — the word itself looks fine in isolation. Inspect activations of both the error word's last token and the next word's last token. Could combine both positions as features for the word_choice classifier, or label the next word as the detection point. This is different from Exp 10 (which tested next-token globally and failed) — here the hypothesis is that it matters specifically for semantic/contextual errors like word_choice, not for surface-level errors like spelling.
-**Importance:** Medium — word_choice is the weakest type (42.0% ±27.8%) and this could be a fundamentally different approach to improving it.
+**Importance:** Medium — word_choice improved to 67.6% with more data (Exp 20) but still the weakest remaining type. This approach could help further.
 
 ### ~~Last-token-only for training and classification~~ ✓ Done (Experiment 11)
 Extended Exp 9's last-token-only training to also cover clean text training tokens and prediction. Intermediate tokens within multi-token words oscillate between error/non-error representations — filtering to last-word tokens eliminates this noise. Results: spelling FP 8%→2.7%, overall FP# 25→22 at t=0.9, precision 76%→79.7% at t=0.95. Clear win, permanent change.
