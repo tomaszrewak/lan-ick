@@ -1016,3 +1016,94 @@ Per-fold results:
 3. **The "are" bias is load-bearing at current scale.** Counterintuitive but true: the classifier's grammar detection works *because* 33% of grammar errors are "is→are", not despite it.
 
 **Commit:** 61b3f29
+
+---
+
+## Experiment 19: Feature extraction speedup — truncation and batching
+
+**Date:** 2026-04-14T23:30:00+02:00
+
+**Goal:** Speed up feature extraction to make scaling to 6000+ pairs practical. Two independent optimizations, benchmarked separately:
+1. **Model truncation**: We only use layers [7,13,17,22]. Layers 23-25 are never read. Setting `config.num_hidden_layers=23` stops the forward pass after layer 22, saving ~12% compute and ~80M params of VRAM. This is provably lossless — the hidden states at layers 0-22 are identical since later layers can't influence earlier ones.
+2. **Batched extraction**: Currently texts are processed one at a time. Batching multiple texts (with padding + attention_mask) improves GPU utilization. Potential concern: attention cross-contamination between padded sequences, though the attention mask should prevent this. Also, N² attention scaling means padding waste grows with batch size.
+
+**Hypothesis:** Truncation gives a modest but guaranteed speedup (~12-15%). Batching gives a larger speedup (2-3x) but needs correctness verification. Combined they should cut 6000-pair extraction from ~3h to ~1-1.5h.
+
+**Parameters:**
+- Benchmark on 50 pairs (100 texts) from existing cached data
+- Configurations: baseline, truncation-only, batching-only, both combined
+- Batch sizes to test: 4, 8, 16
+- Correctness: verify hidden states match between all configurations
+
+### Iteration 1: Truncation
+
+Tried 4 approaches to truncate the model at layer 22 (skipping layers 23-25):
+1. **Post-load layer surgery** (`model.model.layers = model.model.layers[:23]`): 5x SLOWER. Breaks accelerate dispatch hooks installed by `device_map="cuda"`.
+2. **Config-based truncation at load time** (`AutoConfig` with reduced `num_hidden_layers`): 5x SLOWER. HuggingFace warns about "unexpected" weights for layers 23-25, accelerate confused.
+3. **Load without device_map, manual `.to(device)`**: 5x SLOWER. Doesn't get same CUDA optimizations as `device_map="cuda"`.
+4. **Config-only post-load** (just change `config.num_hidden_layers` after loading): 5x SLOWER. Same dispatch hook issues.
+
+Also ran swapped order (truncated first, baseline second) to rule out thermal throttling — truncated still 5x slower.
+
+**Conclusion:** Model truncation is not viable with `device_map="cuda"` + accelerate. The dispatch hooks are deeply entangled with the model structure, and any modification breaks them catastrophically. Even if it worked, it would only save 3/26 layers of forward pass time, which turned out to be a tiny fraction of total time (see below).
+
+### Iteration 2: Batching
+
+Tested batched extraction (multiple texts per forward pass, left-padded with attention mask). Result: **0% speedup**. Forward pass was not the bottleneck.
+
+### Iteration 3: Timing breakdown — finding the real bottleneck
+
+Added per-phase timing to the benchmark:
+
+| Phase | Time (100 texts) | % of total |
+|-------|-------------------|------------|
+| Forward pass | 3.9s | 7% |
+| SAE encode | 0.1s | <1% |
+| Other (tokenize + sparse dict) | 55.4s | **93%** |
+| **Total** | **59.4s** | 100% |
+
+The forward pass + SAE encoding is fast (~40ms/text). The bottleneck was `_sae_acts_to_feats` — a Python loop over all nonzero SAE activations with per-element `.item()` calls, each causing a GPU→CPU synchronization. With ~16k-wide SAEs at ~5% sparsity × ~20 tokens × 4 layers, that's ~60,000 individual `.item()` syncs per text.
+
+### Iteration 4: Vectorized GPU→CPU transfer
+
+**Fix:** Replaced per-element `.item()` calls with bulk `.cpu().tolist()` — three tensor transfers instead of N individual syncs:
+
+```python
+# Before (slow): per-element GPU→CPU sync
+for pos, feat_idx in nonzero:
+    fid = feat_idx.item()
+    layer_feats[fid].append((pos.item(), sae_acts[pos, feat_idx].item(), ...))
+
+# After (fast): bulk transfer, then pure Python loop
+positions = nonzero[:, 0].cpu().tolist()
+feat_ids = nonzero[:, 1].cpu().tolist()
+values = sae_acts[positions, feat_ids].cpu().tolist()
+for pos, fid, val in zip(positions, feat_ids, values):
+    ...
+```
+
+Also optimized `tokenize()` to use `.tolist()` on token_ids before the decode loop.
+
+**Result: 594ms/text → 41ms/text. 14.5x speedup.**
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Per-text time | 594ms | 41ms |
+| 100 texts | 59.4s | 4.1s |
+| 600 pairs (1200 texts) | ~12 min | ~50s |
+| 6000 pairs (12000 texts) | ~119 min | ~8 min |
+
+### Results summary
+
+- **Truncation:** Not viable with `device_map="cuda"` / accelerate. All 4 approaches caused 5x slowdown.
+- **Batching:** 0% speedup. Forward pass is only 7% of total time.
+- **Vectorized sparse dict construction:** **14.5x speedup.** The real bottleneck was Python-level GPU→CPU synchronization in `_sae_acts_to_feats`, not the model or SAE computation.
+- **6000 pairs now feasible:** ~8 minutes instead of ~2 hours.
+
+### Conclusions
+
+The initial hypothesis was entirely wrong — the forward pass (the only thing truncation and batching can help) was 7% of total time, not the bottleneck. The vast majority of extraction time was spent in a seemingly innocuous Python utility function doing per-element `.item()` calls. This is a known PyTorch anti-pattern but easy to miss in profiling since it doesn't show up in GPU metrics.
+
+The fix is simple, lossless, and permanent. Scaling to 6000+ pairs is now practical.
+
+**Commit:** 8762562

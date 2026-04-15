@@ -68,7 +68,7 @@ def tokenize(text: str, device: str = DEVICE) -> tuple[torch.Tensor, list[str]]:
     """Tokenize text. Returns (input_ids tensor on device, list of token strings)."""
     _, tokenizer = load_model(device)
     inputs = tokenizer(text, return_tensors="pt").to(device)
-    token_ids = inputs["input_ids"][0]
+    token_ids = inputs["input_ids"][0].tolist()
     str_tokens = [tokenizer.decode(tid) for tid in token_ids]
     return inputs, str_tokens
 
@@ -106,7 +106,7 @@ def extract_text_features(text: str, layers: list[int]) -> dict:
     """Extract SAE features for a text across specified layers.
 
     Returns:
-        {layer: {feat_id: [(position, activation, token_str)]}}
+        {"tokens": [...], "features": {layer: {feat_id: [(pos, act, tok_str)]}}}
     """
     inputs, str_tokens = tokenize(text)
     hidden_states = get_hidden_states(inputs)
@@ -114,17 +114,27 @@ def extract_text_features(text: str, layers: list[int]) -> dict:
     features = {}
     for layer in layers:
         sae_acts = encode_with_sae(hidden_states[layer + 1], layer)
-        layer_feats: dict[int, list[tuple[int, float, str]]] = {}
-        nonzero = sae_acts.nonzero()
-        for pos, feat_idx in nonzero:
-            fid = feat_idx.item()
-            if fid not in layer_feats:
-                layer_feats[fid] = []
-            layer_feats[fid].append((
-                pos.item(),
-                sae_acts[pos, feat_idx].item(),
-                str_tokens[pos.item()],
-            ))
-        features[layer] = layer_feats
+        features[layer] = _sae_acts_to_feats(sae_acts, str_tokens)
 
     return {"tokens": str_tokens, "features": features}
+
+
+def _sae_acts_to_feats(sae_acts: torch.Tensor,
+                       str_tokens: list[str]) -> dict[int, list[tuple[int, float, str]]]:
+    """Convert SAE activation tensor to sparse feature dict."""
+    nonzero = sae_acts.nonzero()
+    if nonzero.shape[0] == 0:
+        return {}
+    # Bulk GPU→CPU transfer (one sync instead of N .item() calls)
+    positions = nonzero[:, 0]
+    feat_ids = nonzero[:, 1]
+    values = sae_acts[positions, feat_ids].cpu().tolist()
+    positions = positions.cpu().tolist()
+    feat_ids = feat_ids.cpu().tolist()
+
+    layer_feats: dict[int, list[tuple[int, float, str]]] = {}
+    for pos, fid, val in zip(positions, feat_ids, values):
+        if fid not in layer_feats:
+            layer_feats[fid] = []
+        layer_feats[fid].append((pos, val, str_tokens[pos]))
+    return layer_feats

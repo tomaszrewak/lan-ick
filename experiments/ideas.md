@@ -54,7 +54,7 @@ Broad negative selection failed badly (Round 1: F1 81.6→69.3%). Root cause: to
 Completed: 5-fold CV. True baseline: F1=79.6% ±2.4%. Revealed three tiers: rock solid (extra_word 93.7% ±4.5%, wtf 94.9% ±4.9%), reasonable (spelling 91.4% ±7.6%, grammar 65.5% ±11.1%), unreliable (word_choice 42.0% ±27.8%, word_order 29.3% ±17.3%). Previous single-split results were slightly optimistic. Future experiments must report mean ± std.
 
 ### Scale to 6000+ pairs
-**Goal:** With 600 pairs, feature extraction takes ~20 min (cached, one-time). 6000 pairs would be ~3 hours but gives 1000 per type, ~750 training pairs per type, and much more stable feature selection and classifier training. Weak types (word_order especially) are starved for data — word_order collapsed from 64% to 31% after data regeneration in Exp 16, showing high sensitivity to the specific sentence pool.
+**Goal:** With 600 pairs, feature extraction takes ~50s (cached, one-time). 6000 pairs would be ~8 minutes thanks to the vectorized extraction from Exp 19 (was ~2 hours before), giving 1000 per type, ~750 training pairs per type, and much more stable feature selection and classifier training. Weak types (word_order especially) are starved for data — word_order collapsed from 64% to 31% after data regeneration in Exp 16, showing high sensitivity to the specific sentence pool.
 **Importance:** High — straightforward scaling. Exp 16 showed per-type variance is too high at 600 pairs to reliably optimize. **Exp 18 confirmed: data diversity improvements (grammar swap diversity, word_order single-label) are gated on data scale.** At 100 pairs/type, consistency beats diversity. Scale up first, then re-apply diversity fixes.
 
 ### ~~Word_order: only label second swapped word~~ ✗ Failed at current scale (Experiment 18)
@@ -62,6 +62,10 @@ Tested labeling only the displaced word (idx+1) instead of both swapped words. R
 
 ### ~~Diversify grammar swap table~~ ✗ Failed at current scale (Experiment 18)
 Added 18 new GRAMMAR_SWAPS entries (auxiliaries, modals, articles, adj/adv confusion) + capped per-key usage at 5. Result: grammar detection catastrophically collapsed 65.5% → 17.5%. Signal too diluted across ~50 swap keys with only ~87 positive tokens. The "is→are" dominance is load-bearing at 100 pairs/type. **Prerequisite: scale to ≥1000 pairs/type first, then retry.**
+
+### Retry data quality fixes after scaling (grammar diversity + word_order single-label)
+**Goal:** Re-apply the Exp 18 changes — diversified GRAMMAR_SWAPS with per-key cap and word_order single-word labeling — once we have ≥1000 pairs per type. Both changes are theoretically sound but need more training tokens to compensate for signal dilution ([Exp 18](../experiments/log.md) showed consistency beats diversity at 100 pairs/type). Grammar needs enough examples per swap key for the classifier to learn context patterns, and word_order needs enough single-labeled tokens to overcome the halved positive count.
+**Importance:** Medium — blocked on "Scale to 6000+ pairs". Do immediately after that experiment.
 
 ### ~~Compare 16k vs 65k vs 262k SAE widths~~ ✓ Done (Experiment 8)
 Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 FPs at t=0.9). Feature counts similar across widths (~90 spelling, ~15 grammar). 65k found 0 features for missing_word. 262k extremely slow (per-layer eviction). **Conclusion: not worth the cost. Stick with 16k.**
