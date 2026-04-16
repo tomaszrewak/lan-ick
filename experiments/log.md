@@ -1327,4 +1327,4 @@ Per-fold F0.5: [83.9%, 83.5%, 82.5%, 83.1%, 83.1%] — very stable.
 4. **Bonus finding:** the previous leakage inflated combined metrics by ~0.5pp — within noise, so no past experiment's conclusion flips. The most affected number was word_choice detection (67.6 → 57.9), which was the most aggressively optimized per-type threshold (always at 0.99).
 5. **Combined FP rate is ~18% per fold** — this is the real-world FP rate users would experience, not the 5% per-type budget. Reducing this without losing recall is now the clearest path to UX improvement.
 
-**Commit:** f65e221
+**Commit:** 9fb09b6
