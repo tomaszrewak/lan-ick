@@ -99,30 +99,75 @@ def _substitute_vowel(word: str, rng: random.Random) -> str:
     return word[:pos] + replacement + word[pos + 1:]
 
 
+def _repeat_letter(word: str, rng: random.Random) -> str:
+    """Repeat a letter 1-2 extra times (e.g., 'probably' → 'proobably')."""
+    if len(word) < 3:
+        return word
+    pos = rng.randint(0, len(word) - 1)
+    n_repeats = rng.randint(1, 2)
+    return word[:pos] + word[pos] * (1 + n_repeats) + word[pos + 1:]
+
+
 _SPELLING_FUNCS = [
     _swap_adjacent_chars, _delete_char, _insert_char,
-    _drop_double_letter, _substitute_vowel,
+    _drop_double_letter, _substitute_vowel, _repeat_letter,
 ]
 
 
 def corrupt_spelling(sentence, rng, min_errors=1, max_errors=3):
     """Inject character-level spelling errors. Returns (text, labels) or None."""
     words = sentence.split()
-    eligible = [i for i, w in enumerate(words) if len(w) >= 3 and w.isalpha()]
+    # Allow words with apostrophes (contractions) and require 3+ alpha chars
+    eligible = [i for i, w in enumerate(words)
+                if sum(c.isalpha() for c in w) >= 3]
     if not eligible:
         return None
+    # Bias toward longer words: weight by sqrt(len) to generate more
+    # multi-token-word errors (where first-token typos are underrepresented)
+    weights = [len(words[i]) ** 0.5 for i in eligible]
     n_errors = rng.randint(min_errors, min(max_errors, len(eligible)))
-    targets = rng.sample(eligible, n_errors)
+    targets = _weighted_sample(eligible, weights, n_errors, rng)
     labels = {}
     for idx in targets:
-        fn = rng.choice(_SPELLING_FUNCS)
-        new_word = fn(words[idx], rng)
-        if new_word != words[idx]:
-            words[idx] = new_word
-            labels[idx] = ErrorType.SPELLING
+        word = words[idx]
+        # For contractions, only corrupt the alpha part before the apostrophe
+        apos_pos = word.find("'")
+        if apos_pos > 2:
+            base = word[:apos_pos]
+            suffix = word[apos_pos:]
+            fn = rng.choice(_SPELLING_FUNCS)
+            new_base = fn(base, rng)
+            if new_base != base:
+                words[idx] = new_base + suffix
+                labels[idx] = ErrorType.SPELLING
+        else:
+            fn = rng.choice(_SPELLING_FUNCS)
+            new_word = fn(word, rng)
+            if new_word != word:
+                words[idx] = new_word
+                labels[idx] = ErrorType.SPELLING
     if not labels:
         return None
     return " ".join(words), labels
+
+
+def _weighted_sample(population, weights, k, rng):
+    """Weighted sampling without replacement."""
+    pool = list(zip(population, weights))
+    result = []
+    for _ in range(k):
+        if not pool:
+            break
+        total = sum(w for _, w in pool)
+        r = rng.random() * total
+        cumulative = 0
+        for j, (item, w) in enumerate(pool):
+            cumulative += w
+            if cumulative >= r:
+                result.append(item)
+                pool.pop(j)
+                break
+    return result
 
 
 # --------------- Word choice errors ---------------
@@ -264,6 +309,9 @@ GRAMMAR_SWAPS = {
     "they": "them", "them": "they",
 }
 
+# No per-key cap needed with the original compact table.
+# The position-aware feature selection handles specificity.
+
 
 def corrupt_grammar(sentence, rng):
     """Introduce grammatical agreement errors. Returns (text, labels) or None."""
@@ -327,7 +375,8 @@ def corrupt_word_order(sentence, rng):
         return None
     idx = rng.choice(eligible)
     words[idx], words[idx + 1] = words[idx + 1], words[idx]
-    labels = {idx: ErrorType.WORD_ORDER, idx + 1: ErrorType.WORD_ORDER}
+    # Label only the displaced word (idx+1 is the word that moved from its position)
+    labels = {idx + 1: ErrorType.WORD_ORDER}
     return " ".join(words), labels
 
 

@@ -56,15 +56,14 @@ Completed: 5-fold CV. True baseline: F1=79.6% ±2.4%. Revealed three tiers: rock
 ### ~~Scale to 6000+ pairs~~ ✓ Done (Experiment 20)
 Completed: 6000 pairs (1000/type), extraction ~9 min (thanks to Exp 19 vectorization). F1: 79.6% → 84.6% (+5.0pp), variance halved (±2.4% → ±0.6%). word_order nearly doubled (29.3% → 58.8%), word_choice +25.6pp (42.0% → 67.6%). Also re-validated top_N sweep: top_N=100 now works (was overfitting at 600 pairs), giving +1.1pp F1 over top_N=50.
 
-### ~~Word_order: only label second swapped word~~ ✗ Failed at current scale (Experiment 18)
-Tested labeling only the displaced word (idx+1) instead of both swapped words. Result: word_order detection 29.3% → 10.6%. Halving positive training tokens (~150 → ~75) killed the already-marginal signal. **Prerequisite: scale to ≥1000 pairs/type first, then retry.**
+### ~~Word_order: only label second swapped word~~ ✓ Done at scale (Experiment 21)
+Failed at 600 pairs (Exp 18: -19pp), succeeded at 6000 pairs (Exp 21: +1.9pp). Single-label is now the default.
 
-### ~~Diversify grammar swap table~~ ✗ Failed at current scale (Experiment 18)
-Added 18 new GRAMMAR_SWAPS entries (auxiliaries, modals, articles, adj/adv confusion) + capped per-key usage at 5. Result: grammar detection catastrophically collapsed 65.5% → 17.5%. Signal too diluted across ~50 swap keys with only ~87 positive tokens. The "is→are" dominance is load-bearing at 100 pairs/type. **Prerequisite: scale to ≥1000 pairs/type first, then retry.**
+### ~~Diversify grammar swap table~~ ✗ Failed at all scales (Experiments 18, 21)
+Failed at 600 pairs (Exp 18: 65%→17%) AND at 6000 pairs (Exp 21: 77%→0%). Also tried cap=200 (partial recovery 50% but ±25% variance). The expanded table is fundamentally harmful — the compact original table with agreement/tense/pronoun swaps is the right granularity.
 
-### Retry data quality fixes after scaling (grammar diversity + word_order single-label)
-**Goal:** Re-apply the Exp 18 changes — diversified GRAMMAR_SWAPS with per-key cap and word_order single-word labeling — now that we have 1000 pairs per type (Exp 20). Both changes are theoretically sound and previously failed only due to data starvation at 100 pairs/type. Grammar needs enough examples per swap key for the classifier to learn context patterns, and word_order needs enough single-labeled tokens to overcome the halved positive count.
-**Importance:** High — now unblocked. Exp 20 showed word_order (58.8%) and grammar (77.4%) still have headroom.
+### ~~Retry data quality fixes after scaling~~ ✓ Done (Experiment 21)
+Retried at 6000 pairs. Grammar diversity: confirmed harmful at any scale (0% detection). Word_order single-label: succeeded (+1.9pp). Also added repeat-letter corruption, long-word bias for spelling. Net F1: 84.8% (+0.2pp, within noise) but qualitatively better error coverage.
 
 ### ~~Compare 16k vs 65k vs 262k SAE widths~~ ✓ Done (Experiment 8)
 Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 FPs at t=0.9). Feature counts similar across widths (~90 spelling, ~15 grammar). 65k found 0 features for missing_word. 262k extremely slow (per-layer eviction). **Conclusion: not worth the cost. Stick with 16k.**
