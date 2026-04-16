@@ -1262,3 +1262,69 @@ Verified the new corruption patterns in the generated data:
 5. **Contraction gap**: SST2 doesn't have contractions in natural form. Would need a different data source or post-processing to generate "didn't→didin't" patterns. Not critical since the model should generalize from regular word errors.
 
 **Commit:** 6e87a67
+
+
+---
+
+## Experiment 22 — Threshold calibration leakage fix + combined-precision framing
+
+**Date:** 2026-04-17T10:00:00+02:00
+
+**Goal:** Fix a methodological bug: in every experiment since Exp 13, per-type thresholds have been selected on the same test-fold clean texts that are then used to report FP and detection. The FP budget is therefore guaranteed to be met on the reported set by construction. This makes per-type FP a training-set metric and slightly inflates combined F1/precision.
+
+Also shift the headline metric to **combined precision** and **F0.5** (aligned with the updated project goal: avoiding FPs > maximizing recall). Per-type FP budgets remain as an internal tuning knob, but the numbers users care about are sentence-level: "of sentences we flagged, how many were actually errored?"
+
+**Fix:** Carve a calibration split out of the training fold. For each of the 5 outer folds, split `train_idx` 80/20 into `fit_idx` (train the OVR classifier and select features) and `calib_idx` (pick per-type thresholds from clean-text scores under the FP budget). Evaluate on `test_idx`, untouched. This makes the test-set FP a genuine generalization measurement.
+
+**Parameters:**
+- Same pipeline as Exp 21 (6000 pairs v10, top_N=100, layers [7,13,17,22], 16k SAE, 5-fold CV)
+- New: 80/20 fit/calibration split inside each training fold (seed derived from fold index for reproducibility)
+- New primary metrics: combined precision, combined recall, F0.5 (β=0.5)
+- F1 still reported for continuity
+
+**Hypothesis:** Combined precision drops by ~2-5pp vs the Exp 21 number (since thresholds were previously optimistic). Per-type realized FP may sometimes exceed the 5% budget on the held-out test set, which is expected and honest. Recall holds. F0.5 becomes the summary going forward.
+
+### Results
+
+| Metric | Exp 21 (leaky) | Exp 22 (honest) | Delta |
+|--------|---------------|-----------------|-------|
+| **F0.5 (new primary)** | — | **83.2% ± 0.5%** | — |
+| Combined precision | 83.2% ± 0.3% (approx) | 82.4% ± 0.6% | -0.8pp |
+| Combined recall | 86.7% ± 0.5% (approx) | 86.5% ± 1.3% | flat |
+| F1 (sanity) | 84.8% ± 0.5% | 84.4% ± 0.6% | -0.4pp |
+| FP# per fold | ~220 | 221.6 ± 11.0 | flat |
+
+Per-type detection and **realized test-set FP** (threshold picked on separate calibration split):
+
+| Type | Detection | Test FP | Thresh |
+|------|-----------|---------|--------|
+| spelling | 91.9% ± 2.0% | 4.8% | 0.95 |
+| word_choice | 57.9% ± 5.6% | 4.2% | 0.99 |
+| grammar | 77.9% ± 5.0% | 4.8% | 0.98 |
+| word_order | 62.5% ± 1.6% | 4.3% | 0.98 |
+| extra_word | 97.9% ± 1.5% | 1.4% | 0.50 |
+| wtf | 98.6% ± 0.9% | 2.5% | 0.50 |
+
+Per-fold F0.5: [83.9%, 83.5%, 82.5%, 83.1%, 83.1%] — very stable.
+
+### Analysis
+
+**The leakage was real but small.** Combined F1 drops 0.4pp and combined precision 0.8pp after the fix. This is because the 5% FP budget with ~1200 clean texts per fold meant at most 60 FPs were tolerated — a fairly conservative cap that didn't overfit aggressively. Still, the previous numbers were biased upward by construction and now aren't.
+
+**Per-type FP budgets generalize well.** The calibration-set thresholds hold almost exactly on test: spelling 4.8%, word_choice 4.2%, grammar 4.8%, word_order 4.3%. Only fold 5 grammar briefly overshoots to 6.4%; the mean is still in budget. No single type is pathologically mis-calibrated.
+
+**Per-type detection mostly held, with redistribution.** word_choice dropped 67.6% → 57.9% (biggest per-type hit), which is the clearest evidence that its previous threshold was fit tightly against the evaluation set. grammar and word_order held within noise. Strong types (spelling, extra_word, wtf) barely moved.
+
+**Combined precision 82.4%** is now the honest headline. Each fold flags ~220 sentences out of 1200 clean as errored (18.3% combined FP rate across 6 stacked type-detectors). The 5% per-type budget translates to roughly 5% × 6 types / (overlap factor ~1.5) ≈ 20% combined, which matches. **This is the number to beat going forward, not F1.**
+
+**F0.5 variance is ±0.5% — tighter than F1's ±0.6%.** Because F0.5 weights precision 2x and precision is structurally more stable than recall under our budget-capped thresholds, F0.5 is also a lower-variance summary. Good choice as the primary metric.
+
+### Conclusions
+
+1. **Methodology fixed.** Threshold calibration now uses a held-out 20% of the training fold, disjoint from evaluation. All future numbers are directly comparable to this baseline.
+2. **Honest baseline: F0.5 = 83.2% ± 0.5%, precision = 82.4% ± 0.6%, recall = 86.5% ± 1.3%, F1 = 84.4% ± 0.6%.** Use these as the reference point for Exp 23+.
+3. **Combined precision is now the headline.** F1 is reported as a sanity check. An improvement must move F0.5 by more than one std (0.5pp) to count.
+4. **Bonus finding:** the previous leakage inflated combined metrics by ~0.5pp — within noise, so no past experiment's conclusion flips. The most affected number was word_choice detection (67.6 → 57.9), which was the most aggressively optimized per-type threshold (always at 0.99).
+5. **Combined FP rate is ~18% per fold** — this is the real-world FP rate users would experience, not the 5% per-type budget. Reducing this without losing recall is now the clearest path to UX improvement.
+
+**Commit:** f65e221

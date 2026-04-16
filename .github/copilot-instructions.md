@@ -4,7 +4,11 @@
 
 Research project exploring whether LLM internal activations (decoded via Sparse Autoencoders) can detect spelling and grammar errors — detection only, not correction. Uses Gemma 3 1B (pretrained) with GemmaScope 2 SAEs.
 
-**Primary goal:** Maximize error detection correctness while keeping false positives very low. Low FP rate is the higher priority — false positives (underlining correct text) are far more annoying to users than missed errors. When tuning parameters and evaluating experiments, FP rate should be treated as a first-class metric alongside detection rate and F1.
+**Primary goal:** Detect errors while avoiding false positives. A false positive (underlining correct text) is a worse user experience than a missed error, so given any trade-off, prefer the option with fewer FPs — even at the cost of some recall.
+
+**How to evaluate:** The headline metric is **combined precision** on held-out data (what fraction of sentences we flag as errored are actually errored), reported alongside **combined recall** and **combined F0.5** (which weights precision 2x over recall). Also report per-type detection and per-type FP, but treat per-type FP budgets as internal tuning knobs, not as the summary — users see the combined rate, because any type firing on clean text is a FP to them.
+
+When comparing experiments, an improvement must move combined F0.5 (or combined precision at similar recall) by more than the per-fold std. F1 is still useful as a sanity check but is not the target — it treats precision and recall symmetrically, which doesn't match the UX.
 
 ## Architecture
 

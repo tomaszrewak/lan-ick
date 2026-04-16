@@ -4,6 +4,18 @@ Future experiment proposals, ordered roughly by priority/importance. Update this
 
 ---
 
+### Reduce combined FP rate (sentence-level calibration)
+**Goal:** Current pipeline runs 6 independent per-type OVR detectors each tuned to ~5% FP on their own. At the sentence level (any type firing = flag), this stacks to ~18% combined FP (Exp 22). This is the user-visible FP rate and the main gap to UX-quality performance. Approaches to try: (a) tune thresholds jointly against a global combined-FP budget instead of per-type; (b) require agreement from ≥2 types before firing (uncorrelated FPs rarely co-occur); (c) second-stage sentence-level calibrator — take the 6 per-type max-scores as input features and train a single LR/MLP on sentence labels to output one combined probability. Option (c) is also where non-linearity has enough data to help (thousands of sentences vs hundreds of positive tokens per type).
+**Importance:** High — addresses the headline metric directly now that F0.5 / combined precision is the target.
+
+### Diagnose grammar FPs (feature-level inspection)
+**Goal:** The grammar classifier produces frequent FPs on correct "is/are" usage in manual testing. Before any more data-side fixes, open the box: (1) print the top 10 positive-coefficient features for the grammar OVR model, (2) extract their activations on the FP sentences and on a random sample of clean SST2 sentences, (3) classify each top feature as "token detector" (fires on `is`/`are` regardless of context), "n-gram detector", or "context-aware grammar feature". If they're token detectors, that's a concrete sign that position-aware selection is failing for grammar — candidate fix: exclude features that fire >X% of the time on the same token in clean text. If they're context-aware, it's a threshold/calibration issue, not a feature issue.
+**Importance:** High — addresses the most prominent real-world failure mode directly, and either outcome produces an actionable follow-up.
+
+### Full layer sweep across all 26 layers
+**Goal:** Map where error-detection signal emerges and peaks. Current choice of [7,13,17,22] was inherited from Exp 1 with no explicit justification. With the Exp 19 speedup a full 26-layer sweep at 1000 pairs is feasible in an afternoon. Report per-layer feature counts, per-layer top-N detection, and combined performance dropping each layer one at a time. Outputs: (a) the smallest layer subset that matches current performance (directly sizes the fused model), (b) whether any layer is a net FP contributor that should be dropped.
+**Importance:** High — gates the fused-model goal and may reduce FPs by removing noisy layers.
+
 ### ~~Scale up synthetic data (100s–1000s of pairs)~~ ✓ Done (Experiment 1)
 Completed: 300 pairs, F1=70.1%. Features dropped from 204→41 (more selective). Bottleneck is now threshold/classifier.
 
@@ -68,10 +80,6 @@ Retried at 6000 pairs. Grammar diversity: confirmed harmful at any scale (0% det
 ### ~~Compare 16k vs 65k vs 262k SAE widths~~ ✓ Done (Experiment 8)
 Completed: 262k marginally best (F1=76.7% vs 75.4%, P=68.0% vs 66.0%, 31 vs 34 FPs at t=0.9). Feature counts similar across widths (~90 spelling, ~15 grammar). 65k found 0 features for missing_word. 262k extremely slow (per-layer eviction). **Conclusion: not worth the cost. Stick with 16k.**
 
-### Test with only layers 5–13 (drop upper layers)
-**Goal:** Check if restricting to layers 5, 10, 13 (29 features) still matches the full 5-layer result (41 features). Layers 17 and 22 contribute only 13 features and the signal tapers off there. If performance holds, the fused model can be truncated at layer 13 instead of 22 — roughly halving the LLM portion and making classification significantly faster.
-**Importance:** High — directly determines how much of the model we can strip for the fused deployment.
-
 ### Word-level prediction aggregation
 **Goal:** Instead of max-across-all-tokens for sentence-level scoring, aggregate per-word (max or mean of the word's tokens). This gives word-level error highlighting — more useful for a real UI. The last-token-only training (Exp 9) makes this natural since signal concentrates at word boundaries.
 **Importance:** Medium — needed for production UX, but sentence-level detection is sufficient for experiments.
@@ -85,10 +93,6 @@ Tested labeling the first token *after* the error word (instead of the last toke
 
 ### ~~Last-token-only for training and classification~~ ✓ Done (Experiment 11)
 Extended Exp 9's last-token-only training to also cover clean text training tokens and prediction. Intermediate tokens within multi-token words oscillate between error/non-error representations — filtering to last-word tokens eliminates this noise. Results: spelling FP 8%→2.7%, overall FP# 25→22 at t=0.9, precision 76%→79.7% at t=0.95. Clear win, permanent change.
-
-### Layer sweep across all 26 layers
-**Goal:** Map exactly where error-detection signal emerges and peaks. Current experiment samples 5 layers; a full sweep would reveal the optimal layer(s) to use for the final classifier.
-**Importance:** High — needed to decide which layer(s) to bake into the fused model.
 
 ### ~~Missing word: label sentence-end punctuation instead of next word~~ — Category dropped (Experiment 16)
 The `missing_word` category was removed entirely — 0% detection with threshold=1.0. The category is fundamentally not detectable at the word level with SAEs: the gap is a structural issue, not a token-level anomaly.

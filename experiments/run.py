@@ -1,6 +1,8 @@
-"""Experiment 17: K-fold cross-validation.
+"""Experiment 22: Threshold calibration leakage fix + combined-precision framing.
 
-Replaces single 75/25 split with 5-fold CV to get reliable mean ± std metrics.
+Splits each training fold into fit / calibration subsets so per-type thresholds
+are tuned on data disjoint from the final evaluation set. Reports F0.5 as the
+primary metric alongside combined precision/recall.
 """
 
 import random
@@ -19,6 +21,13 @@ K_FOLDS = 5
 FOLD_SEED = 42
 
 
+def _f_beta(p: float, r: float, beta: float) -> float:
+    if p + r == 0:
+        return 0.0
+    b2 = beta * beta
+    return (1 + b2) * p * r / (b2 * p + r)
+
+
 def kfold_split(n: int, k: int, seed: int) -> list[tuple[list[int], list[int]]]:
     """Generate K train/test index splits."""
     indices = list(range(n))
@@ -35,46 +44,74 @@ def kfold_split(n: int, k: int, seed: int) -> list[tuple[list[int], list[int]]]:
     return folds
 
 
-def evaluate_fold(all_pairs, all_features, train_idx, test_idx, fold_num):
-    """Run full pipeline on one fold: feature selection → train → threshold → evaluate."""
-    train_pairs = [all_pairs[i] for i in train_idx]
-    test_pairs = [all_pairs[i] for i in test_idx]
-    train_features = [all_features[i] for i in train_idx]
-    test_features = [all_features[i] for i in test_idx]
+CALIB_RATIO = 0.2  # fraction of training fold held out for threshold calibration
 
-    # Feature selection + training
-    per_type_feats = select_features_position_aware_topn(
-        train_features, LAYERS, train_pairs, top_n=TOP_N,
-    )
-    classifier = train_ovr(train_features, train_pairs, LAYERS, per_type_feats)
 
-    # Score test set
+def _score_pairs(pairs, features, classifier):
+    """Score clean + error texts for each pair. Returns (error_scores, clean_scores)."""
     error_scores: list[dict[ErrorType, float]] = []
     clean_scores: list[dict[ErrorType, float]] = []
-    for pf, pair in zip(test_features, test_pairs):
+    for pf, pair in zip(features, pairs):
         for text_key, text, scores_list in [
             ("error", pair.error, error_scores),
             ("clean", pair.clean, clean_scores),
         ]:
             tpreds = predict_tokens_ovr(pf[text_key], classifier, text=text)
-            scores = {}
-            for et in classifier.models:
-                scores[et] = max((tp.error_probs.get(et, 0.0) for tp in tpreds), default=0.0)
+            scores = {
+                et: max((tp.error_probs.get(et, 0.0) for tp in tpreds), default=0.0)
+                for et in classifier.models
+            }
             scores_list.append(scores)
+    return error_scores, clean_scores
 
-    # Threshold optimization (FP budget on this fold's test clean texts)
-    n_clean = len(clean_scores)
-    max_fp = int(n_clean * FP_BUDGET)
+
+def evaluate_fold(all_pairs, all_features, train_idx, test_idx, fold_num):
+    """Run full pipeline on one fold.
+
+    Training fold is split further into fit_idx (feature selection + LR training)
+    and calib_idx (per-type threshold selection under FP budget). Test fold is
+    used only for the final reported metrics. This prevents the leakage where
+    thresholds were previously fit on the same clean texts used for evaluation.
+    """
+    # Split training fold into fit + calibration (deterministic per fold)
+    rng = random.Random(FOLD_SEED * 100 + fold_num)
+    shuffled = list(train_idx)
+    rng.shuffle(shuffled)
+    n_calib = max(1, int(len(shuffled) * CALIB_RATIO))
+    calib_idx = sorted(shuffled[:n_calib])
+    fit_idx = sorted(shuffled[n_calib:])
+
+    fit_pairs = [all_pairs[i] for i in fit_idx]
+    fit_features = [all_features[i] for i in fit_idx]
+    calib_pairs = [all_pairs[i] for i in calib_idx]
+    calib_features = [all_features[i] for i in calib_idx]
+    test_pairs = [all_pairs[i] for i in test_idx]
+    test_features = [all_features[i] for i in test_idx]
+
+    # Feature selection + training (on fit split only)
+    per_type_feats = select_features_position_aware_topn(
+        fit_features, LAYERS, fit_pairs, top_n=TOP_N,
+    )
+    classifier = train_ovr(fit_features, fit_pairs, LAYERS, per_type_feats)
+
+    # Threshold calibration on held-out calibration split
+    _, calib_clean_scores = _score_pairs(calib_pairs, calib_features, classifier)
+    n_calib_clean = len(calib_clean_scores)
+    max_fp_calib = int(n_calib_clean * FP_BUDGET)
     type_thresholds: dict[ErrorType, float] = {}
     for et in classifier.models:
         best_t = 1.0
         for t_int in range(50, 100):
             t = t_int / 100
-            fp_count = sum(1 for cs in clean_scores if cs.get(et, 0) >= t)
-            if fp_count <= max_fp:
+            fp_count = sum(1 for cs in calib_clean_scores if cs.get(et, 0) >= t)
+            if fp_count <= max_fp_calib:
                 best_t = t
                 break
         type_thresholds[et] = best_t
+
+    # Final scoring on test set (unseen during fit OR calibration)
+    error_scores, clean_scores = _score_pairs(test_pairs, test_features, classifier)
+    n_clean = len(clean_scores)
 
     # Per-type detection rates
     per_type_det: dict[ErrorType, float] = {}
@@ -120,6 +157,7 @@ def main():
     all_fp: dict[ErrorType, list[float]] = {et: [] for et in ErrorType}
     all_thresh: dict[ErrorType, list[float]] = {et: [] for et in ErrorType}
     all_f1, all_p, all_r, all_fp_count = [], [], [], []
+    all_f05 = []
 
     for fold_num, (train_idx, test_idx) in enumerate(folds):
         print(f"\n{'='*50}")
@@ -139,11 +177,12 @@ def main():
                 all_det[et].append(per_type_det[et])
                 all_fp[et].append(per_type_fp[et])
                 all_thresh[et].append(per_type_thresh[et])
-        print(f"\n  Combined: F1={cm.f1:.1%}  P={cm.precision:.1%}  R={cm.recall:.1%}  FP#={cm.fp}")
+        print(f"\n  Combined: F0.5={_f_beta(cm.precision, cm.recall, 0.5):.1%}  F1={cm.f1:.1%}  P={cm.precision:.1%}  R={cm.recall:.1%}  FP#={cm.fp}")
         all_f1.append(cm.f1)
         all_p.append(cm.precision)
         all_r.append(cm.recall)
         all_fp_count.append(cm.fp)
+        all_f05.append(_f_beta(cm.precision, cm.recall, 0.5))
 
     # 3. Summary
     print(f"\n{'='*60}")
@@ -163,12 +202,16 @@ def main():
     p_arr = np.array(all_p)
     r_arr = np.array(all_r)
     fp_arr = np.array(all_fp_count)
-    print(f"\n  Combined F1:  {f1_arr.mean():.1%} ± {f1_arr.std():.1%}")
-    print(f"  Precision:    {p_arr.mean():.1%} ± {p_arr.std():.1%}")
-    print(f"  Recall:       {r_arr.mean():.1%} ± {r_arr.std():.1%}")
-    print(f"  FP count:     {fp_arr.mean():.1f} ± {fp_arr.std():.1f}")
-    print(f"\n  Per-fold F1:  {[f'{f:.1%}' for f in all_f1]}")
-    print(f"\n  Combined: F1={cm.f1:.1%}  P={cm.precision:.1%}  R={cm.recall:.1%}  FP#={cm.fp}")
+    f05_arr = np.array(all_f05)
+    print(f"\n  Combined F0.5: {f05_arr.mean():.1%} ± {f05_arr.std():.1%}  [PRIMARY]")
+    print(f"  Precision:     {p_arr.mean():.1%} ± {p_arr.std():.1%}")
+    print(f"  Recall:        {r_arr.mean():.1%} ± {r_arr.std():.1%}")
+    print(f"  F1 (sanity):   {f1_arr.mean():.1%} ± {f1_arr.std():.1%}")
+    print(f"  FP count:      {fp_arr.mean():.1f} ± {fp_arr.std():.1f}")
+    print(f"\n  Per-fold F0.5: {[f'{f:.1%}' for f in all_f05]}")
+    print(f"  Per-fold F1:   {[f'{f:.1%}' for f in all_f1]}")
+    print(f"  Per-fold P:    {[f'{p:.1%}' for p in all_p]}")
+    print(f"  Per-fold R:    {[f'{r:.1%}' for r in all_r]}")
 
 
 if __name__ == "__main__":
