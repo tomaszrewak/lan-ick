@@ -1411,3 +1411,76 @@ Greedy F0.5 threshold means (across folds): extra_word 0.85, wtf 0.96, grammar 0
 **Cleanup:** Making `greedy_f05` the default threshold policy in `src/pipeline.py` (replacing the per-type budget). Updating run.py to a clean K-fold CV over this policy. Keeping `global_max` and `agreement2` out of the codebase — they were decisively measured and lost.
 
 **Commit:** c1d774b
+
+
+---
+
+## Experiment 24 — Diagnose grammar FPs (feature-level inspection)
+
+**Date:** 2026-04-17T13:00:00+02:00
+
+**Goal:** Under the Exp 23 greedy-F0.5 calibration, grammar's threshold ends up near 1.0 and the per-type FP is low numerically, but manual testing still surfaces grammar FPs on correct "is/are" usage. Open the box on grammar's top features to see whether they are (a) *token detectors* that fire on specific surface tokens regardless of context — evidence that position-aware selection is leaking token-keyed features — or (b) *context-aware grammar features* that fire mostly at true grammar error positions — in which case the problem is calibration/thresholding, not feature selection.
+
+**Procedure:**
+1. Train the production classifier via `build_classifier()` (fit-only split, greedy-F0.5 calibrated on calibration split).
+2. Take grammar's OVR logistic regression and rank its features by positive coefficient.
+3. For the top-K features (K=10), compute on held-out test-set data:
+   - Fire rate on *all clean test tokens* (broad baseline)
+   - Fire rate at *last-token positions of grammar error words* in grammar-error sentences (target signal)
+   - Most-common surface tokens at which the feature fires in clean text
+4. Classify each feature as token-detector (fires on a small vocabulary of tokens at >X% rate across clean text) vs context-aware (fires rarely overall, concentrated at grammar error positions).
+
+**Hypothesis:** At least some of grammar's top features will be token-detectors, given the persistent FP-on-`is/are` complaint. If ≥3 of the top 10 are token-keyed, we have a concrete lever — filter them out during selection by a "token concentration" test.
+
+### Results
+
+
+Inspected grammar's top 10 features by LR coefficient under the calibrated greedy-F0.5 classifier (grammar threshold = 0.99, 49 FPs on 1500 clean test sentences). For each feature we report: fire rate on all clean test tokens, fire rate at grammar-error last-token positions, and the top-3 surface tokens at each.
+
+| # | layer | fid | coef | clean_rate | gram_rate | top clean tokens | top err tokens | reading |
+|---|-------|------|------|-----------|----------|-------------------|-----------------|---------|
+| 1 | 7 | 2793 | 0.048 | 0.11% | 7.2% | `gave` 7%, `takes` 7%, `caught` 7% | `made` 20%, `came` 15%, `went` 10% | **past-tense verb detector** |
+| 2 | 7 | 3255 | 0.044 | 0.04% | 9.3% | `these` **100%** | `these` 81%, `These` 19% | **token detector (`these`)** |
+| 3 | 13 | 7063 | 0.040 | 0.05% | 15.4% | `those` 82%, `Those` 9% | `those` 81%, `Those` 19% | **token detector (`those`)** |
+| 4 | 7 | 5656 | 0.038 | 0.14% | 29.0% | `Are` 30%, `Have` 15%, `are` 15% | `are` 57%, `Are` 22%, `were` 7% | **BE-verb / modal detector** |
+| 5 | 7 | 12719 | 0.036 | 2.55% | 21.1% | `,` 49%, `.` 6%, `s` 5% | `are` 29%, `has` 10%, `is` 10% | punctuation/high-freq; fires broadly |
+| 6 | 7 | 13206 | 0.035 | 0.32% | 8.2% | `make` 6%, `seem` 5%, `feel` 4% | `have` 30%, `do` 30%, `are` 22% | auxiliary / bare-verb detector |
+| 7 | 7 | 4940 | 0.031 | 0.39% | 10.0% | `'` 17%, `the` 13%, `it` 4% | `those` 75%, `have` 11%, `us` 7% | mixed |
+| 8 | 7 | 2362 | 0.030 | 0.17% | 10.4% | `it` 38%, `that` 15%, `those` 12% | `those` 72%, `these` 14%, `that` 7% | **demonstrative detector** |
+| 9 | 13 | 1796 | 0.020 | 0.63% | 11.1% | `Gets` 3%, `must` 3%, `by` 2% | `those` 19%, `are` 16%, `she` 10% | scattered |
+| 10 | 7 | 2603 | 0.019 | 0.02% | 14.7% | `those` 75%, `Those` 25% | `those` 80%, `Those` 20% | **token detector (`those`)** |
+
+**Grammar-type FPs on test set:** 49 sentences, dominated by exactly the tokens the top features detect — `Are`(9), `is`(8), `these`(7), `those`(3), `were`(2), `are`(2). Examples: *"...spirit of these performers..."*, *"...all these years..."*, *"Those eternally devoted..."*, *"A potentially good comic premise and excellent cast are terribly wasted"*.
+
+### Analysis
+
+**Hypothesis confirmed, and stronger than expected.** 6 of the top 10 grammar features are clearly token-keyed (features 2, 3, 4, 8, 10, and arguably 1/6 for grammatical *category* detection). The smoking gun is that **the top error tokens match the top clean tokens** for these features. Feature 3 fires 82% on `those` in clean text and 81% on `those` at grammar error positions — there is no context discrimination, only a token filter.
+
+**Why this happens — a selection artifact of narrow corruption.** Our synthetic grammar corruption targets a small vocabulary: `is↔are`, `this↔these`, `that↔those`, `was↔were`, pronoun-case swaps, a handful of verb-tense swaps. Consequently, at grammar error positions the token distribution is dominated by these specific surface forms. Position-aware feature selection keeps features that fire at error positions but *not anywhere in clean text of the same pair*; a feature that just fires on `those` will pass this filter because (a) most error pairs where the error word is `those` also have the corresponding clean sentence not containing `those` (the corruption was `that→those`), (b) even features that fire occasionally in other clean sentences do so rarely enough to survive the top-100 cut.
+
+The fatal assumption was that "fires at error word position, not in clean text of same pair" would pick up *error-specific* features. It actually picks up *target-vocabulary* features, because the corruption is a token substitution.
+
+**Why the FP rate isn't worse.** The target tokens (`is/are/those/these/were`) are relatively rare overall in SST2 (~1–2% of tokens). A 100%-on-`these` feature only fires ~0.04% of the time on random clean text. With a threshold of 0.99 and ~100 features, the LR needs sufficient evidence to fire strongly — so most clean sentences don't hit. But 49/1500 = 3.3% of clean test sentences have enough "target tokens" present to trigger. In real-world text where these tokens are more common than in SST2 (e.g., instruction writing with "these/those" demonstratives everywhere), this FP rate will be much worse — matching the user's manual observation of grammar FPs on correct `is/are` usage.
+
+**What this means for the pipeline.** The grammar detector is not actually detecting grammar errors. It's detecting *presence of tokens that grammar-corruption rules target*. For correctly-formed sentences containing those tokens, it has no discriminative signal.
+
+**Two concrete follow-up levers, ranked by expected impact:**
+
+1. **Selection-side fix: conditional feature filter.** For each candidate grammar feature, compute fire rate on error tokens vs fire rate on *the same tokens in clean text aggregate* (not same-pair). If P(fire | token=`those`, clean text) ≈ P(fire | token=`those`, grammar-error position), the feature has no conditional discrimination — reject it. Expected to prune features 2/3/10/4 immediately. Testable in a self-contained experiment.
+2. **Data-side fix: diversify grammar corruption.** Expand beyond targeted substitutions — for instance, introduce subject-verb disagreement by *inserting* extra verbs or swapping *neighbors* of the verb rather than the verb form itself. Move corruption away from a fixed target vocabulary so the selection-side fix has something to latch onto. Bigger lift but more involved.
+
+**Secondary observation about feature 5.** Feature 12719 fires 2.55% in clean text — an order of magnitude higher than the rest — concentrated on `,` (49%). This is a punctuation detector; it's in the grammar top 10 because punctuation density correlates weakly with corruption structure. Worth confirming whether pruning it hurts grammar detection or not.
+
+### Conclusions
+
+1. **Grammar FPs are not a threshold problem; they are a feature-selection problem.** The top features are token-keyed by design of our corruption.
+2. **Position-aware + pair-wise selection is insufficient** when the corruption is a token substitution on a small vocabulary. It passes any feature whose firing token happens to match the target vocabulary.
+3. **The fix is a conditional contrastive selection criterion.** Filter features whose clean-text fire-rate conditional on their dominant firing token is similar to their error-text fire-rate conditional on the same token. This has a direct lever on features 2/3/10/4 with minimal disruption to selection elsewhere.
+4. **Next experiment candidate:** implement the conditional filter; measure (a) how many grammar features survive, (b) the new grammar FP rate on test, (c) the combined F0.5 change. If grammar precision goes up and recall doesn't collapse, ship it.
+5. **Same diagnostic should be run for all 6 types, not just grammar.** It is possible (likely) that word_choice and word_order share the same pathology because they also use token-substitution corruption. A single diagnostic pass across all types can scope the conditional filter's blast radius before we build it.
+
+### Cleanup
+
+No source changes — this was a diagnostic-only experiment. `experiments/run.py` will be reverted to the K-fold CV runner in cleanup so HEAD continues to reflect the best-known pipeline.
+
+**Commit:** (pending)
