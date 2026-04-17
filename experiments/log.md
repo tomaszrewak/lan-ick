@@ -1483,4 +1483,4 @@ The fatal assumption was that "fires at error word position, not in clean text o
 
 No source changes — this was a diagnostic-only experiment. `experiments/run.py` will be reverted to the K-fold CV runner in cleanup so HEAD continues to reflect the best-known pipeline.
 
-**Commit:** (pending)
+**Commit:** 27e59b5
