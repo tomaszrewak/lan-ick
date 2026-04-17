@@ -1484,3 +1484,83 @@ The fatal assumption was that "fires at error word position, not in clean text o
 No source changes — this was a diagnostic-only experiment. `experiments/run.py` will be reverted to the K-fold CV runner in cleanup so HEAD continues to reflect the best-known pipeline.
 
 **Commit:** 27e59b5
+
+
+---
+
+## Experiment 25 — Conditional contrastive feature selection (token-keyed feature filter)
+
+**Date:** 2026-04-17T14:00:00+02:00
+
+**Goal:** Exp 24 showed that 6/10 of grammar's top features are token-keyed — they fire on `those/these/are/were` in clean text at the same rate as at error positions, so they detect *target vocabulary* rather than *grammar errors*. This experiment (a) audits all 6 error types to scope the problem, then (b) implements a conditional contrastive filter that rejects token-keyed features during selection. Measure combined F0.5 before/after the filter.
+
+**Procedure:**
+1. Train the production classifier. For each type's top-10 LR features, classify as token-keyed vs context-aware (same method as Exp 24 but across all types).
+2. Implement the filter: during `select_features_position_aware_topn`, for each candidate feature, identify its dominant firing token at error positions. Compute that token's fire rate in clean text aggregate (across ALL training clean texts, not just same-pair). If `P(fire | token=t, error position) / P(fire | token=t, clean text)` < R for the dominant token, reject the feature. Sweep R ∈ {2, 3, 5, 10}.
+3. Re-train OVR + greedy-F0.5 calibration with the filter active at various R values.
+4. Report: per-type candidate/selected counts, combined F0.5, per-type FP counts, grammar FP count specifically.
+
+**Hypothesis:** The filter will prune grammar's token-keyed features (2/3/4/10 from Exp 24) without affecting spelling/extra_word/wtf (which use different corruption mechanisms). Grammar FPs should drop substantially; combined F0.5 should improve or hold steady since grammar's greedy-calibrated threshold was already near 1.0 (it contributed little recall).
+
+### Results
+
+
+#### Phase 1: All-types feature audit
+
+Classified top-10 LR features per type as token-keyed (TK: conditional ratio < 3) vs OK.
+
+| Type | TK / 10 | Dominant TK tokens | Notes |
+|------|:-------:|---------------------|-------|
+| **grammar** | **7** | `those/these/are/were/made/came` | Worst; corruption is direct token substitution |
+| **word_order** | **6** | `the/a/an/of/for` | Function words dominate; POS-swap puts determiners in wrong position |
+| **word_choice** | **4** | `too/buy/s/then/won` | Confusables are small vocab; `too` alone accounts for 2 features |
+| **spelling** | **3** | `ies/e/ly` (suffixes) | Misspelling produces non-words, so features fire on subword fragments — partial token-keying on common suffixes |
+| **extra_word** | **0** | — | Insertion produces duplicate words at novel positions → features are positional, not token-keyed |
+| **wtf** | **0** | — | Random-char substitution produces rare subwords (`q`, `jq`, `w`) that never appear in clean text → ratio = ∞ |
+
+**Pattern:** token-keyed features are pervasive in types that use vocabulary-restricted token substitution (grammar, word_order, word_choice). Types that produce novel surface forms (spelling misspellings, extra_word insertions, wtf gibberish) are clean.
+
+#### Phase 2: Conditional contrastive filter + 5-fold CV
+
+| Setting | F0.5 | P | R | F1 | FP# | grammar FP | word_choice FP | word_order FP |
+|---------|------|------|------|------|-----|-----------|---------------|--------------|
+| baseline | **85.9%** ± 0.7% | 88.2% | 77.9% | 82.6% | 127 ± 32 | 233 | 75 | 195 |
+| R=2 | 84.7% ± 1.0% | 85.9% | 80.4% | 83.0% | 159 ± 16 | 240 | **192** | 211 |
+| R=3 | 85.8% ± 1.1% | 86.9% | 81.8% | 84.3% | 148 ± 13 | **187** | **186** | 204 |
+| R=5 | 85.8% ± 1.1% | 87.5% | 79.5% | 83.3% | 137 ± 16 | 207 | 121 | 162 |
+| R=10 | 85.4% ± 0.7% | 87.3% | 78.6% | 82.7% | 137 ± 10 | 198 | 147 | 162 |
+
+(Per-type FP numbers are 5-fold sums, AFTER greedy-F0.5 threshold calibration.)
+
+Rejection counts per fold (means): R=2 rejects ~50–90 per type; R=10 rejects ~90–190 for grammar; grammar candidates ~2400, so all R values still fill 100 features.
+
+### Analysis
+
+**The filter does not improve combined F0.5.** Baseline 85.9% is matched at best (R=3 and R=5 at 85.8%), never exceeded. No R value crosses the ±0.7% noise band.
+
+**Why it fails — reject-and-backfill from an equally-bad pool.**
+
+The filter rejects the most token-keyed features but always backfills to 100 by taking the next-ranked candidates. Grammar has ~2400 candidates; rejecting 115 (R=3) leaves ~2285, still plenty to fill 100. Those replacement features are *almost* as token-keyed — they just scored slightly above the ratio threshold. The corruption mechanism guarantees that nearly ALL grammar candidate features correlate with target-vocabulary tokens, because the corruption IS a token substitution. Filtering the worst 5% doesn't change the fundamental signal.
+
+**Destabilizing side-effect on other types.** The most striking result is word_choice FPs: baseline 75 → R=2 **192**, R=3 **186**. The filter changes which features are selected, shifting the feature landscape. The greedy-F0.5 calibrator adjusts — word_choice threshold drops from 1.00 to 0.99 — but the new equilibrium is worse because the replacement features have different FP profiles. The filter creates as many problems as it solves.
+
+**Grammar FPs specifically:** R=3 achieves the best grammar FP reduction (233→187, −20%), but the improvement is overwhelmed by word_choice degradation (+111). The greedy calibrator already pushes grammar's threshold to 0.99 in all settings, so the 20% grammar FP reduction translates to ~0 improvement in combined metrics because most grammar "FPs" are below the 0.99 threshold anyway.
+
+**Grammar's problem is not in the top 100 features; it's in the feature pool itself.** Position-aware + pair-wise selection from token-substitution corruptions will always surface token-keyed features. The 101st grammar feature is nearly as token-keyed as the 1st. The conditional filter is a cosmetic fix on a structural issue.
+
+### Conclusions
+
+1. **The conditional contrastive filter is a dead end** for improving combined F0.5. Reject-and-backfill cannot work when the entire candidate pool is contaminated by the same token-substitution mechanism.
+2. **The all-types audit is the valuable deliverable.** It confirms:
+   - grammar (7/10 TK), word_order (6/10), word_choice (4/10) — token-substitution types are systematically affected
+   - extra_word (0/10), wtf (0/10) — novel-surface-form types are clean
+   - spelling (3/10) — partially affected (suffix-level token keying)
+3. **The right lever is data diversification, not feature filtering.** Grammar corruption must produce errors that aren't direct vocabulary substitutions. For example: article deletion/insertion, auxiliary duplication, verb-form agreement errors that change the morphological form (not swap between two fixed tokens). This changes the surface-form distribution at error positions, so features that fire there must be genuinely context-aware.
+4. **Alternatively: reduce grammar to fewer features (e.g., 30 instead of 100) and accept lower recall.** The contaminated features dilute the LR — fewer but cleaner features might give sharper discrimination. This is cheap to test as a follow-up.
+5. **Word_order has the same pathology (6/10 TK)** — its function-word-dominated corruption creates the same issue. It would benefit from the same data diversification.
+
+### Cleanup
+
+Reverting `run.py` to the K-fold CV runner. No source changes worth keeping — the experiment conclusively showed the filter doesn't help. Data diversification (for grammar + word_order + word_choice) is the recommended path forward.
+
+**Commit:** fc3b7d0

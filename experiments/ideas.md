@@ -7,18 +7,25 @@ Future experiment proposals, ordered roughly by priority/importance. Update this
 ### ~~Reduce combined FP rate (sentence-level calibration)~~ ✓ Done (Experiment 23)
 Completed: Greedy F0.5 coordinate descent over per-type thresholds on a held-out calibration split beats the per-type 5% budget baseline. F0.5 82.4%→85.9%, combined precision 82.4%→88.2%, combined FPs 222→127 (−43%), at the cost of recall 86.5%→77.9%. Greedy F0.5 is now the default calibration in `src/pipeline.py`. `global_max` (single threshold on max-over-types) was nearly identical (85.7%) and simpler; kept greedy because it exposes per-type structure. `agreement2` crushed recall to 32% — types are not redundant.
 
-### Second-stage sentence-level meta-classifier
-### Conditional (per-token contrastive) feature selection
-**Goal:** Direct follow-up to Exp 24. Grammar's top features are token-keyed: they fire on `those/these/are/is/were` regardless of context because the corruption rules substitute exactly those tokens. Fix at selection time: for each candidate feature, compute `P(feature fires | token=t, clean aggregate)` vs `P(feature fires | token=t, error position)` for its dominant firing tokens. Keep a feature only if this ratio is ≥R (e.g., R=3) for its top firing tokens — i.e., there is real conditional discrimination beyond token identity. Expected to prune features 2/3/10/4 from the Exp 24 inspection. Measure: new grammar FP count on test, grammar recall change, combined F0.5 change.
-**Importance:** High — concrete, actionable fix to the root cause of grammar FPs identified by Exp 24.
+### ~~Conditional (per-token contrastive) feature selection~~ ✗ Failed (Experiment 25)
+Swept ratio threshold R ∈ {2, 3, 5, 10}. None beat baseline F0.5 85.9%. Root cause: reject-and-backfill from an equally-bad pool — grammar has ~2400 candidates, rejecting ~115 (R=3) still fills 100 features with nearly-as-token-keyed replacements. Worse: the filter destabilized other types (word_choice FP 75→192 at R=2). The entire grammar candidate pool is contaminated because the corruption IS a token substitution. Feature-level filtering is a dead end; the fix must come from the data side.
 
-### Per-type token-keyed feature audit (diagnostic, all 6 types)
-**Goal:** Re-run the Exp 24 feature inspection for `spelling`, `word_choice`, `word_order`, `extra_word`, `wtf`. Word_choice and word_order likely have the same token-keyed pathology (their corruption is also token substitution). Spelling and extra_word may not (spelling produces non-words, extra_word inserts). The result scopes whether the conditional filter above should be type-specific or global.
-**Importance:** Medium — cheap diagnostic that de-risks the conditional-filter experiment before we invest in it.
+### ~~Per-type token-keyed feature audit (diagnostic, all 6 types)~~ ✓ Done (Experiment 25)
+Completed: grammar 7/10 TK, word_order 6/10, word_choice 4/10, spelling 3/10, extra_word 0/10, wtf 0/10. Token-keyed features are pervasive in vocabulary-restricted substitution types. Novel-surface-form types (extra_word, wtf) are clean. Confirms the fix must target grammar/word_order/word_choice corruption diversity, not feature selection.
 
-### Diversify grammar corruption
-**Goal:** The fundamental driver of Exp 24's findings is that grammar corruption is a substitution over a small vocabulary. Complementary fix to the conditional filter: introduce grammar errors that aren't direct token swaps — insert/delete articles, swap verb order with auxiliary (`has been running` → `running has been`), insert duplicate auxiliaries, use wrong preposition. Broadens the set of surface forms at grammar error positions so selection naturally picks features that aren't `those`-detectors.
-**Importance:** Medium — bigger lift than the conditional filter but addresses the same root cause from the data side. Worth doing if the selection-side fix isn't sufficient.
+### Diversify grammar corruption (v2 — structural errors, not token swaps)
+**Goal:** Exp 25 proved that the grammar candidate pool is fundamentally contaminated because the corruption IS a token substitution. Previous attempt (Exp 18/21) expanded the swap TABLE (more token↔token pairs) — that failed because it's still the same mechanism. New approach: introduce grammar errors that aren't direct token swaps at all:
+- **Article insertion/deletion** — "the cat" → "cat" or "cat" → "the cat" (changes token count, no fixed vocab)
+- **Auxiliary duplication** — "has been running" → "has has been running"
+- **Subject-verb agreement via morphological change** — "the dogs run" → "the dogs runs" (changes verb form, not swapping between two fixed tokens)
+- **Wrong preposition** — "interested in" → "interested at" (large preposition vocab makes it non-token-keyed)
+The key difference from Exp 18/21: these errors change WHAT tokens are present or HOW MANY tokens there are, not just WHICH of two fixed tokens appears. This should produce features that are genuinely context-aware rather than token-keyed.
+Note: Exp 21's "diversify grammar swap table" (expanding the token-swap table with 50+ entries) failed because it's still the same mechanism — the failure was about the corruption paradigm, not the table size.
+**Importance:** High — top priority. Exp 25 conclusively showed the fix must come from data, not feature selection. This is the direct path forward for grammar (7/10 TK) and potentially word_order (6/10 TK) and word_choice (4/10 TK).
+
+### Reduce per-type feature count for contaminated types
+**Goal:** Quick follow-up from Exp 25: instead of 100 features for grammar/word_order/word_choice, try fewer (e.g., 30). With contaminated pools, more features = more noise. The LR might discriminate better with fewer, sharper inputs. Cheap to test as a sweep: per-type top_N ∈ {20, 30, 50, 100} for grammar/word_order only, keeping 100 for clean types.
+**Importance:** Medium — quick test that might squeeze a point or two without data changes.
 
 ### Second-stage sentence-level meta-classifier
 **Goal:** Exp 23 explored per-type thresholds (a) and AND-agreement (b) but did not try option (c): train a single LR/MLP on the 6 per-type max-scores as features and sentence-level label as target. Greedy ended up with near-1.0 thresholds on 5/6 types, effectively OR-ing strong signals — a learned linear combination could find non-trivial weightings (e.g., weak `grammar` + moderate `spelling` → error). Try: extract per-type max-scores for every sentence in the calibration split, fit LR/tiny MLP to predict `is_error`, report F0.5. If F0.5 > 85.9% by more than 0.7pp (per-fold std), adopt as default.
