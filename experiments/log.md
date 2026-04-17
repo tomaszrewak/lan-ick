@@ -1410,4 +1410,4 @@ Greedy F0.5 threshold means (across folds): extra_word 0.85, wtf 0.96, grammar 0
 
 **Cleanup:** Making `greedy_f05` the default threshold policy in `src/pipeline.py` (replacing the per-type budget). Updating run.py to a clean K-fold CV over this policy. Keeping `global_max` and `agreement2` out of the codebase — they were decisively measured and lost.
 
-**Commit:** (pending)
+**Commit:** c1d774b
