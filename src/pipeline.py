@@ -1,5 +1,7 @@
 """Shared pipeline: build classifier from cached data, run inference on text."""
 
+import random
+
 from src.cache import cached
 from src.data import (
     ErrorType, generate_synthetic_pairs, split_train_test,
@@ -8,7 +10,7 @@ from src.data import (
 from src.model import extract_text_features
 from src.classifier import (
     OVRClassifier, select_features_position_aware_topn,
-    train_ovr, predict_tokens_ovr,
+    train_ovr, predict_tokens_ovr, calibrate_greedy_f05,
 )
 
 # --------------- Default parameters ---------------
@@ -20,12 +22,13 @@ MAX_WORDS = 20
 DATA_SEED = 42
 TRAIN_RATIO = 0.75
 SPLIT_SEED = 42
+CALIB_RATIO = 0.2          # fraction of training fold reserved for threshold calibration
+CALIB_SEED = 4242
 DATA_VERSION = "v10"
 EXTRACT_VERSION = "v4"
 DATA_CACHE_KEY = f"{DATA_VERSION}_n{N_PAIRS}"
 EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w16k"
 TOP_N = 100
-FP_BUDGET = 0.05
 
 
 # --------------- Load data ---------------
@@ -53,46 +56,56 @@ def load_data():
     return all_pairs, all_features
 
 
+def calibration_split(train_idx: list[int], calib_ratio: float, seed: int) -> tuple[list[int], list[int]]:
+    """Split a training index list into (fit_idx, calib_idx) deterministically."""
+    shuffled = list(train_idx)
+    random.Random(seed).shuffle(shuffled)
+    n_calib = max(1, int(len(shuffled) * calib_ratio))
+    return sorted(shuffled[n_calib:]), sorted(shuffled[:n_calib])
+
+
+def _score_clean_error(pairs, features, classifier):
+    """Return (error_scores, clean_scores) as lists of {ErrorType: max_prob} dicts."""
+    error_scores, clean_scores = [], []
+    for pf, pair in zip(features, pairs):
+        for key, text, out in [("error", pair.error, error_scores),
+                               ("clean", pair.clean, clean_scores)]:
+            tpreds = predict_tokens_ovr(pf[key], classifier, text=text)
+            out.append({
+                et: max((tp.error_probs.get(et, 0.0) for tp in tpreds), default=0.0)
+                for et in classifier.models
+            })
+    return error_scores, clean_scores
+
+
 # --------------- Build classifier ---------------
 
-def build_classifier() -> OVRClassifier:
-    """Load cached data, select features, train OVR, compute thresholds.
+def build_classifier() -> tuple[OVRClassifier, list, list, list[int], list[int]]:
+    """Load cached data, select features, train OVR, calibrate thresholds.
 
-    Returns a ready-to-use OVRClassifier with per-type thresholds set.
+    Training fold is split 80/20 into fit + calibration. Features and LR are
+    fit on the fit split; per-type thresholds are set by greedy F0.5 coordinate
+    descent on the calibration split (see `calibrate_greedy_f05`). The test
+    split is untouched.
+
+    Returns (classifier, all_pairs, all_features, train_idx, test_idx).
     """
     all_pairs, all_features = load_data()
     train_idx, test_idx = split_train_test(all_pairs, TRAIN_RATIO, SPLIT_SEED)
-    train_pairs = [all_pairs[i] for i in train_idx]
-    test_pairs = [all_pairs[i] for i in test_idx]
-    train_features = [all_features[i] for i in train_idx]
-    test_features = [all_features[i] for i in test_idx]
+    fit_idx, calib_idx = calibration_split(train_idx, CALIB_RATIO, CALIB_SEED)
+
+    fit_pairs = [all_pairs[i] for i in fit_idx]
+    fit_features = [all_features[i] for i in fit_idx]
+    calib_pairs = [all_pairs[i] for i in calib_idx]
+    calib_features = [all_features[i] for i in calib_idx]
 
     per_type_feats = select_features_position_aware_topn(
-        train_features, LAYERS, train_pairs, top_n=TOP_N,
+        fit_features, LAYERS, fit_pairs, top_n=TOP_N,
     )
+    classifier = train_ovr(fit_features, fit_pairs, LAYERS, per_type_feats)
 
-    classifier = train_ovr(train_features, train_pairs, LAYERS, per_type_feats)
-
-    # Compute thresholds on test clean texts (FP budget)
-    clean_scores: list[dict[ErrorType, float]] = []
-    for pf, pair in zip(test_features, test_pairs):
-        tpreds = predict_tokens_ovr(pf["clean"], classifier, text=pair.clean)
-        scores = {}
-        for et in classifier.models:
-            scores[et] = max((tp.error_probs.get(et, 0.0) for tp in tpreds), default=0.0)
-        clean_scores.append(scores)
-
-    n_clean = len(clean_scores)
-    max_fp = int(n_clean * FP_BUDGET)
-    for et in classifier.models:
-        best_t = 1.0
-        for t_int in range(50, 100):
-            t = t_int / 100
-            fp_count = sum(1 for cs in clean_scores if cs.get(et, 0) >= t)
-            if fp_count <= max_fp:
-                best_t = t
-                break
-        classifier.thresholds[et] = best_t
+    calib_err, calib_clean = _score_clean_error(calib_pairs, calib_features, classifier)
+    calibrate_greedy_f05(classifier, calib_err, calib_clean)
 
     return classifier, all_pairs, all_features, train_idx, test_idx
 

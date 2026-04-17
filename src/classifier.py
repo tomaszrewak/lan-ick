@@ -330,6 +330,54 @@ class OVRClassifier:
         return f"OVRClassifier({', '.join(lines)})"
 
 
+def _f_beta(p: float, r: float, beta: float) -> float:
+    if p + r == 0:
+        return 0.0
+    b2 = beta * beta
+    return (1 + b2) * p * r / (b2 * p + r)
+
+
+def calibrate_greedy_f05(
+    classifier: "OVRClassifier",
+    calib_error_scores: list[dict[ErrorType, float]],
+    calib_clean_scores: list[dict[ErrorType, float]],
+    n_passes: int = 3,
+) -> dict[ErrorType, float]:
+    """Set per-type thresholds by coordinate descent on combined F0.5.
+
+    A sentence fires if any type's max-score meets its threshold. We sweep
+    each type's threshold in [0.50, 1.00] holding others fixed, picking the
+    value that maximizes combined F0.5 on the calibration set. Repeats
+    `n_passes` times. Stores thresholds on the classifier and returns them.
+    """
+    types = list(classifier.models.keys())
+    # Initialize at 0.5 (permissive) — coordinate descent converges quickly either way.
+    thresholds = {et: 0.50 for et in types}
+    n_err = len(calib_error_scores)
+    n_clean = len(calib_clean_scores)
+
+    for _ in range(n_passes):
+        for et in types:
+            best_t, best_f05 = thresholds[et], -1.0
+            for t_int in range(50, 101):
+                t = t_int / 100
+                trial = dict(thresholds)
+                trial[et] = t
+                tp = sum(1 for s in calib_error_scores
+                         if any(s.get(e, 0) >= trial[e] for e in types))
+                fp = sum(1 for s in calib_clean_scores
+                         if any(s.get(e, 0) >= trial[e] for e in types))
+                p = tp / (tp + fp) if tp + fp else 0.0
+                r = tp / n_err if n_err else 0.0
+                f05 = _f_beta(p, r, 0.5)
+                if f05 > best_f05:
+                    best_f05, best_t = f05, t
+            thresholds[et] = best_t
+
+    classifier.thresholds = dict(thresholds)
+    return thresholds
+
+
 def train_ovr(
     train_pair_features: list[dict],
     train_pairs: list[TextPair],
