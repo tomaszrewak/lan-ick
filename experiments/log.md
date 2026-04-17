@@ -1564,3 +1564,81 @@ The filter rejects the most token-keyed features but always backfills to 100 by 
 Reverting `run.py` to the K-fold CV runner. No source changes worth keeping — the experiment conclusively showed the filter doesn't help. Data diversification (for grammar + word_order + word_choice) is the recommended path forward.
 
 **Commit:** fc3b7d0
+
+---
+
+## Experiment 26 — Diversify grammar corruption (structural strategies)
+
+**Date:** 2026-04-17T15:30:00+08:00
+
+**Goal:** Replace token-swap grammar corruption with structural strategies (verb agreement flip, wrong preposition, tense change) to produce diverse error tokens. Exp 25 proved the grammar candidate feature pool is contaminated because corruption IS a token substitution — filtering can't fix it, the data must change.
+
+**Procedure:**
+1. Replace `corrupt_grammar` in data.py: drop GRAMMAR_SWAPS, add 3 strategies:
+   - Verb agreement: irregular (is↔are, was↔were, etc.) + regular (VBZ strip -s, VBP add -s)
+   - Wrong preposition: replace IN-tagged preposition with random other from 28-entry pool
+   - Tense change: irregular (go↔went, etc.) + regular (VBD strip -ed, VB add -ed)
+2. Drop demonstrative swaps (this/these, that/those) and pronoun case swaps (I/me, he/him) — these are the primary source of token-keyed features.
+3. Bump DATA_VERSION to v11 to force regeneration.
+4. Run standard 5-fold CV, compare against baseline (F0.5=85.9%, P=88.2%, R=77.9%).
+
+**Hypothesis:** Grammar FPs should decrease substantially (fewer token-keyed features in the pool). Grammar recall may decrease initially (structural errors might be harder for SAE to detect) but the features that survive should be genuinely context-aware. Combined F0.5 should improve if the FP reduction outweighs any recall loss.
+
+**Key parameters:** Same as baseline (LAYERS=[7,13,17,22], TOP_N=100, N_PAIRS=6000, greedy F0.5 calibration).
+
+### Results
+
+(pending)
+
+#### Round 1: All 3 strategies (agreement + preposition + tense)
+
+DATA_VERSION=v11. Strategy distribution: ~80% preposition swaps (dominant because prepositions appear in nearly every sentence), ~15% agreement, ~5% tense.
+
+| Metric | Baseline (Exp 23) | Round 1 | Delta |
+|--------|:--:|:--:|:--:|
+| F0.5 | 85.9% ± 0.7% | **84.4% ± 1.4%** | −1.5pp |
+| P | 88.2% | 88.3% | = |
+| R | 77.9% | **72.0%** | −5.9pp |
+| FP# | 127 ± 32 | 114 ± 12 | −13 |
+
+Grammar threshold: **1.00 in all 5 folds** — grammar fully disabled. The preposition swaps ("of" → "among", "in" → "through") are too subtle for the SAE to detect. Features that fire on prepositions fire equally on clean text, producing pure noise. The greedy calibrator kills grammar entirely, costing 5.9pp recall.
+
+#### Round 2: Agreement + tense only (no prepositions)
+
+DATA_VERSION=v12. Strategy distribution: agree_irreg 35%, strip_s 22%, add_ed 22%, tense_irreg 14%, add_s 4%, strip_ed 4%.
+
+| Metric | Baseline (Exp 23) | Round 2 | Delta |
+|--------|:--:|:--:|:--:|
+| F0.5 | 85.9% ± 0.7% | **85.1% ± 0.6%** | −0.8pp |
+| P | 88.2% | 88.3% | = |
+| R | 77.9% | **74.6%** | −3.3pp |
+| FP# | 127 ± 32 | 119 ± 18 | −8 |
+
+Grammar threshold: 0.99 (4 folds), 1.00 (1 fold) — similar to baseline. Better than Round 1 but still below baseline. The morphological changes (add/strip -s/-ed) are partially detectable but no better than the old token swaps. The 3.3pp recall drop includes both grammar's contribution and a data-seed shift affecting other types (changing grammar corruption changes which sentences are allocated to grammar, rippling to other types' data).
+
+### Analysis
+
+**The SAE detects surface-level token anomalies, not contextual grammar errors.**
+
+Three levels of grammar corruption, ordered by SAE detectability:
+1. **Demonstrative/pronoun swaps** (this→these, I→me) — **most** detectable. These tokens at certain positions are unusual enough that SAE features light up. But they're token-keyed → FPs.
+2. **Morphological changes** (runs→run, walk→walked) — **partially** detectable. The morphological form change produces a token that's slightly unusual in context, but the base form is common enough that features fire on clean text too. Net: similar to (1) but without the concentrated token-keying.
+3. **Preposition swaps** (in→at, of→among) — **undetectable**. Prepositions are extremely common in all contexts. No SAE feature distinguishes "at" in wrong context from "at" in right context.
+
+This hierarchy reveals a fundamental limitation: **the SAE's grammar-relevant features are token-identity features, not context-agreement features**. A feature that fires when `those` appears is useful for detection (because `those` at the wrong position IS the error) but also fires on correct `those` (→ FP). A feature that would fire ONLY when `those` disagrees with its antecedent doesn't exist in the SAE (or if it does, it's not in the top candidates).
+
+**Data diversification cannot fix this.** The old corruption (token swaps over a small vocabulary) happens to be the best match for the SAE's capabilities. The token-keyed features are not a bug — they're the ONLY signal the SAE provides for grammar. Making the errors more diverse just makes them harder to detect.
+
+### Conclusions
+
+1. **Revert all changes.** The old GRAMMAR_SWAPS table is optimal for the SAE's detection mechanism.
+2. **Grammar detection is inherently limited by SAE feature monosemanticity.** SAE features decompose activations into token/subword directions, not syntactic-agreement directions. This is consistent with how Gemma's early-to-mid layers process text.
+3. **Accept grammar's FP profile.** The greedy calibrator already handles it well (threshold=0.99), effectively disabling grammar except for the strongest signals. Trying to improve grammar detection further is fighting the architecture.
+4. **Redirect effort to impactful experiments:** layer sweep (which layers contribute what), meta-classifier (combining per-type scores non-linearly), or reducing per-type feature counts for contaminated types.
+5. **The "diversify grammar swap table" idea is now fully exhausted** — both expanding the table (Exp 18/21) and replacing the mechanism (Exp 26) failed. Remove from ideas.md.
+
+### Cleanup
+
+Reverted `src/data.py` and `src/pipeline.py` to pre-experiment state. No source changes kept.
+
+**Commit:** a754393

@@ -13,15 +13,8 @@ Swept ratio threshold R ∈ {2, 3, 5, 10}. None beat baseline F0.5 85.9%. Root c
 ### ~~Per-type token-keyed feature audit (diagnostic, all 6 types)~~ ✓ Done (Experiment 25)
 Completed: grammar 7/10 TK, word_order 6/10, word_choice 4/10, spelling 3/10, extra_word 0/10, wtf 0/10. Token-keyed features are pervasive in vocabulary-restricted substitution types. Novel-surface-form types (extra_word, wtf) are clean. Confirms the fix must target grammar/word_order/word_choice corruption diversity, not feature selection.
 
-### Diversify grammar corruption (v2 — structural errors, not token swaps)
-**Goal:** Exp 25 proved that the grammar candidate pool is fundamentally contaminated because the corruption IS a token substitution. Previous attempt (Exp 18/21) expanded the swap TABLE (more token↔token pairs) — that failed because it's still the same mechanism. New approach: introduce grammar errors that aren't direct token swaps at all:
-- **Article insertion/deletion** — "the cat" → "cat" or "cat" → "the cat" (changes token count, no fixed vocab)
-- **Auxiliary duplication** — "has been running" → "has has been running"
-- **Subject-verb agreement via morphological change** — "the dogs run" → "the dogs runs" (changes verb form, not swapping between two fixed tokens)
-- **Wrong preposition** — "interested in" → "interested at" (large preposition vocab makes it non-token-keyed)
-The key difference from Exp 18/21: these errors change WHAT tokens are present or HOW MANY tokens there are, not just WHICH of two fixed tokens appears. This should produce features that are genuinely context-aware rather than token-keyed.
-Note: Exp 21's "diversify grammar swap table" (expanding the token-swap table with 50+ entries) failed because it's still the same mechanism — the failure was about the corruption paradigm, not the table size.
-**Importance:** High — top priority. Exp 25 conclusively showed the fix must come from data, not feature selection. This is the direct path forward for grammar (7/10 TK) and potentially word_order (6/10 TK) and word_choice (4/10 TK).
+### ~~Diversify grammar corruption (v2 — structural errors, not token swaps)~~ ✗ Failed (Experiment 26)
+Tested three structural strategies: verb agreement (-s add/strip + irregular), wrong preposition, tense change (-ed add/strip + irregular). Dropped demonstrative/pronoun swaps. **Results:** Round 1 (all 3 strategies): preposition swaps dominate (~80%) and are undetectable by SAE → grammar fully disabled (threshold=1.00), F0.5 84.4% (−1.5pp). Round 2 (agreement + tense only, no prepositions): F0.5 85.1% (−0.8pp), grammar threshold back to 0.99 but still below baseline. **Root cause:** the SAE detects surface-level token anomalies, not contextual grammar errors. Data diversification cannot fix this — the old token-swap table is actually the best match for the SAE's capabilities. Grammar corruption is now fully exhausted as an improvement avenue (Exp 18, 21, 25, 26 all failed).
 
 ### Reduce per-type feature count for contaminated types
 **Goal:** Quick follow-up from Exp 25: instead of 100 features for grammar/word_order/word_choice, try fewer (e.g., 30). With contaminated pools, more features = more noise. The LR might discriminate better with fewer, sharper inputs. Cheap to test as a sweep: per-type top_N ∈ {20, 30, 50, 100} for grammar/word_order only, keeping 100 for clean types.
