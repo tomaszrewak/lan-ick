@@ -1709,3 +1709,78 @@ Tested whether fewer layers with early emphasis can match or beat the 5-layer co
 - Per-layer caches for all 26 layers are now available for future experiments
 
 **Commit:** 6f4fdfd
+
+---
+
+## Experiment 28 — Reduce per-type feature count for contaminated types
+
+**Date:** 2026-04-18T17:00:00+08:00
+
+**Goal:** Test whether reducing top_N for contaminated types (grammar, word_order, word_choice) improves combined F0.5. Exp 25 showed these types have heavily token-keyed candidate pools (grammar 7/10, word_order 6/10, word_choice 4/10). With 100 features from a contaminated pool, more features = more noise. Fewer, sharper features might help the LR discriminate better.
+
+**Hypothesis:** Reducing top_N to 20–50 for contaminated types while keeping 100 for clean types (spelling, extra_word, wtf) will improve combined precision and F0.5 by reducing noise from token-keyed features.
+
+**Key parameters:** Layers [3,7,13,25], sweep contaminated top_N ∈ {20, 30, 50, 75}, clean types fixed at 100, 5-fold CV, greedy F0.5 calibration, N=6000 pairs.
+
+### Results
+
+**Round 1** — Sweep contaminated top_N ∈ {20, 30, 50, 75, 100}, clean fixed at 100:
+
+Completely flat — all settings produced identical F0.5=87.1%, P=88.8%, R=81.1%. Initial code had a bug: a duplicate loop in `select_features_position_aware_topn` caused `et_top_n` to always use the last type's value, so all types got the same N regardless of the dict.
+
+**Round 2** — Bug fixed, sweep contaminated top_N ∈ {1, 2, 5, 10, 20, 100} with per-type breakdown:
+
+| Contam N | F0.5 | ±std | P | R |
+|---|---|---|---|---|
+| 1 | 83.4% | ±1.3% | 88.8% | 67.2% |
+| 2 | 84.6% | ±0.7% | 88.5% | 72.0% |
+| 5 | 85.5% | ±0.7% | 88.5% | 75.3% |
+| 10 | 85.8% | ±0.9% | 88.7% | 76.0% |
+| 20 | 86.8% | ±0.7% | 88.5% | 80.6% |
+| 100 | 87.1% | ±1.0% | 88.8% | 81.1% |
+
+Per-type detection rates:
+
+| Type | N=1 | N=2 | N=5 | N=10 | N=20 | N=100 |
+|---|---|---|---|---|---|---|
+| spelling | 86% | 86% | 86% | 86% | 86% | 86% |
+| extra_word | 96% | 95% | 96% | 96% | 96% | 96% |
+| wtf | 97% | 96% | 97% | 96% | 96% | 97% |
+| grammar | 31% | 28% | 55% | **71%** | 70% | 46% |
+| word_order | 22% | 41% | 44% | 28% | 61% | 61% |
+| word_choice | 27% | 18% | 26% | 35% | 36% | **68%** |
+
+Top-1 feature per type (diagnostic on full dataset):
+
+| Type | Layer | Feature ID | Candidates |
+|---|---|---|---|
+| spelling | 7 | 374 | 5946 |
+| extra_word | 7 | 8480 | 1978 |
+| wtf | 7 | 567 | 3847 |
+| grammar | 13 | 3568 | 1883 |
+| word_order | 7 | 12305 | 2307 |
+| word_choice | 3 | 1363 | 3292 |
+
+### Analysis
+
+1. **Precision is rock-solid at ~88.5–88.8% regardless of N.** The greedy F0.5 calibrator compensates perfectly by adjusting thresholds. The difference between N values is entirely in recall.
+
+2. **N=20 is nearly as good as N=100** (Δ=−0.3%, within fold std). ~80% of features beyond the top 20 contribute no meaningful signal. The dropoff from 20→10 is notable (−1.0pp), and below 5 it degrades sharply.
+
+3. **Clean types (spelling, extra_word, wtf) are completely unaffected** — their features are fixed at 100 and their detection rates don't change. This validates the experimental design.
+
+4. **Grammar peaks at N=10 (71%) then drops to 46% at N=100.** This is the strongest evidence yet that more features actively *hurt* grammar — the LR gets confused by token-keyed noise features. The calibrator then pushes the threshold to 0.99 to compensate for FPs, killing recall. At N=10 the features are cleaner, threshold stays at 0.97, and detection is 25pp higher.
+
+5. **word_choice is the opposite — it genuinely benefits from many features**, going from 27% (N=1) to 68% (N=100). This makes sense: word_choice has lower token-keyed contamination (4/10 vs grammar's 7/10 from Exp 25).
+
+6. **Layer 7 dominates** — 4 of 6 types have their top feature in layer 7. Grammar's top feature is in layer 13, word_choice in layer 3.
+
+### Conclusions
+
+- Keeping top_N=100 for all types — the combined F0.5 is still best at 100, even though grammar would prefer ~10
+- Per-type optimal N would be: grammar ~10, word_order ~20, word_choice 100, clean types 100. But pursuing per-type tuning adds complexity for marginal gain since the calibrator already handles it.
+- The per-type top_N infrastructure in `select_features_position_aware_topn` is useful and kept (accepts `dict[ErrorType, int]` or `int`)
+- Fixed duplicate-loop bug in feature selection code
+- Key insight: the calibration stage is the effective defense against contaminated features, not feature count reduction
+
+**Commit:** `c84ec19`

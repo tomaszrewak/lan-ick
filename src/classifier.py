@@ -38,7 +38,7 @@ def select_features_position_aware_topn(
     pair_features: list[dict],
     layers: list[int],
     train_pairs: list[TextPair],
-    top_n: int = 50,
+    top_n: int | dict[ErrorType, int] = 50,
     min_count: int = 2,
     verbose: bool = True,
 ) -> dict[ErrorType, dict[int, set[int]]]:
@@ -47,6 +47,9 @@ def select_features_position_aware_topn(
     Only counts features that fire at error word last-token positions in
     error text and NOT anywhere in clean text. Ranks by pair count and
     takes top N globally (across layers) per type.
+
+    top_n can be a single int (same for all types) or a dict mapping
+    ErrorType to per-type limits.
     """
     type_indices: dict[ErrorType, list[int]] = {}
     for i, pair in enumerate(train_pairs):
@@ -55,6 +58,7 @@ def select_features_position_aware_topn(
     per_type: dict[ErrorType, dict[int, set[int]]] = {}
 
     for et, indices in type_indices.items():
+        et_top_n = top_n[et] if isinstance(top_n, dict) else top_n
         # Count (layer, fid) appearances across pairs
         counter: Counter[tuple[int, int]] = Counter()
 
@@ -102,11 +106,11 @@ def select_features_position_aware_topn(
                 break
             feats[layer].add(fid)
             n_selected += 1
-            if n_selected >= top_n:
+            if n_selected >= et_top_n:
                 break
 
         if verbose:
-            print(f"  {et.value}: {n_candidates} candidates → {n_selected} selected (top-{top_n})")
+            print(f"  {et.value}: {n_candidates} candidates → {n_selected} selected (top-{et_top_n})")
         per_type[et] = feats
 
     return per_type
