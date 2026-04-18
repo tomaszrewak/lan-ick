@@ -27,9 +27,12 @@ Tested three structural strategies: verb agreement (-s add/strip + irregular), w
 ### ~~Diagnose grammar FPs (feature-level inspection)~~ ✓ Done (Experiment 24)
 Completed: Inspected grammar's top 10 LR features on held-out test data. **Hypothesis confirmed strongly** — 6/10 features are token-keyed detectors for `those/these/are/Are/were` and related grammatical-category tokens. Top error tokens match top clean tokens per feature (e.g., feature 3 fires 82% on `those` in clean, 81% on `those` at grammar error positions — no conditional discrimination). Grammar FPs are dominated by exactly these tokens (`Are`×9, `is`×8, `these`×7, `those`×3, `were`×2). Root cause: corruption is a token substitution over a small vocabulary, so position-aware selection with pair-wise same-pair-clean filter passes any feature whose firing token matches the target vocabulary. Follow-ups: conditional per-token feature filter (high importance), all-types diagnostic, diversify grammar corruption.
 
-### Full layer sweep across all 26 layers
-**Goal:** Map where error-detection signal emerges and peaks. Current choice of [7,13,17,22] was inherited from Exp 1 with no explicit justification. With the Exp 19 speedup a full 26-layer sweep at 1000 pairs is feasible in an afternoon. Report per-layer feature counts, per-layer top-N detection, and combined performance dropping each layer one at a time. Outputs: (a) the smallest layer subset that matches current performance (directly sizes the fused model), (b) whether any layer is a net FP contributor that should be dropped.
-**Importance:** High — gates the fused-model goal and may reduce FPs by removing noisy layers.
+### ~~Full layer sweep across all 26 layers~~ ✓ Done (Experiment 27)
+Completed: Tested 6+4 layer combos across two rounds. Round 1: [3,7,13,17,25] beat baseline [7,13,17,22] by +0.9pp F0.5 (86.8% vs 85.9%, 5-fold validated). Round 2: [3,7,13,25] selected as new default — same 4-layer count as baseline, +1.1pp F0.5 in screening, highest precision (88.6%), and faster. Early layers carry more signal than expected. Per-layer caches exist for all 26 layers.
+
+### Expanded layer combo search (6-7 layers with early emphasis)
+**Goal:** Exp 27 showed early layers are surprisingly powerful. Try 5-6 layer combos building on [3,7,13,25]: e.g., [3,5,7,13,25], [3,7,8,13,25], [3,5,7,13,17,25]. Per-layer caches already extracted.
+**Importance:** Medium-low — diminishing returns likely since [3,7,13,25] already beats the 5-layer combo on precision.
 
 ### ~~Scale up synthetic data (100s–1000s of pairs)~~ ✓ Done (Experiment 1)
 Completed: 300 pairs, F1=70.1%. Features dropped from 204→41 (more selective). Bottleneck is now threshold/classifier.

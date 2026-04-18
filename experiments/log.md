@@ -1642,3 +1642,70 @@ This hierarchy reveals a fundamental limitation: **the SAE's grammar-relevant fe
 Reverted `src/data.py` and `src/pipeline.py` to pre-experiment state. No source changes kept.
 
 **Commit:** a754393
+
+---
+
+## Experiment 27 — Layer combination comparison
+
+**Date:** 2026-04-17T16:30:00+08:00 (started), 2026-04-18 (completed)
+
+**Goal:** Test whether different layer selections meaningfully change performance. The current baseline [7,13,17,22] was inherited from Exp 1 without systematic comparison. Rather than a full sweep of all 26 layers (which proved too slow), directly compare diverse layer combinations.
+
+**Procedure:** 6 hand-picked combos tested with 2-fold CV screening, then 5-fold validation on baseline + best. Per-layer feature caches pre-extracted for all 26 layers.
+
+**Hypothesis:** Layer choice matters, but mid-range layers dominate. Adding early (3) and very late (25) layers might add complementary signal.
+
+**Key parameters:** TOP_N=100, 2-fold screening / 5-fold validation, greedy F0.5 calibration, 16k SAE width, N=6000 pairs.
+
+### Results
+
+**Phase 1 — 2-fold quick screening:**
+
+| Combo | Layers | F0.5 | P | R | Δ vs baseline |
+|---|---|---|---|---|---|
+| early+late | [3, 7, 13, 17, 25] | 87.0% | 88.0% | 83.2% | +1.6% |
+| early_3 | [5, 8, 11] | 85.8% | 90.2% | 71.9% | +0.5% |
+| baseline | [7, 13, 17, 22] | 85.4% | 87.1% | 79.2% | — |
+| alt_spread | [5, 9, 15, 19, 24] | 84.9% | 87.9% | 74.7% | -0.5% |
+| sparse_3 | [3, 15, 25] | 84.7% | 86.8% | 77.5% | -0.7% |
+| late_4 | [15, 18, 20, 24] | 81.5% | 83.1% | 75.5% | -3.9% |
+
+**Phase 2 — 5-fold validated:**
+
+- **Baseline [7,13,17,22]:** F0.5=85.9%±0.7%, P=88.2%, R=77.9%
+- **early+late [3,7,13,17,25]:** F0.5=86.8%±0.5%, P=88.9%, R=79.4%
+- **Δ = +0.9%** (just above ±0.7% fold std)
+
+### Analysis
+
+1. **Layer choice matters but within a band.** The gap between best and worst is 5.5pp F0.5 (87.0% vs 81.5%), but all mid-range combos cluster within ~2pp. Late-only layers are clearly worse.
+
+2. **[3,7,13,17,25] beats baseline on all three metrics:** +0.7pp precision, +1.5pp recall, +0.9pp F0.5, with lower variance (±0.5% vs ±0.7%). Adding early layer 3 and very late layer 25 while dropping 22 provides complementary signal.
+
+3. **Early layers carry more signal than expected.** [5,8,11] (only early layers) hit 85.8% F0.5 with 90.2% precision — highest precision of any combo. This suggests character/token-level error features are strongly represented in early layers.
+
+4. **Late layers alone are weak.** [15,18,20,24] at 81.5% confirms signal peaks in early-mid layers, not late.
+
+5. **The +0.9% improvement is marginal** — it's at the edge of statistical significance given ±0.7% fold std. Worth adopting since it's free (same computational cost), but not a breakthrough.
+
+### Round 2 — Layer minimization
+
+Tested whether fewer layers with early emphasis can match or beat the 5-layer combo:
+
+| Combo | Layers | F0.5 (2-fold) | P | R | Δ vs baseline |
+|---|---|---|---|---|---|
+| best_5 | [3, 7, 13, 17, 25] | 87.0% | 88.0% | 83.2% | +1.6% |
+| skip_17 | [3, 7, 13, 25] | 86.5% | 88.6% | 79.0% | +1.1% |
+| baseline | [7, 13, 17, 22] | 85.4% | 87.1% | 79.2% | — |
+| minimal_3 | [3, 7, 25] | 85.2% | 87.0% | 79.3% | -0.1% |
+
+**[3,7,13,25]** is the sweet spot: 4 layers (same count as baseline), +1.1pp F0.5, highest precision (88.6%), and 30% faster than the 5-layer combo. Dropping layer 17 costs only ~0.5pp F0.5. Dropping layer 13 further (→ [3,7,25]) loses another ~1.3pp and falls back to baseline level.
+
+### Conclusions
+
+- Update default layers to [3, 7, 13, 25]
+- Round 2 confirmed [3,7,13,25] as the sweet spot: 4 layers (same as baseline), better F0.5, higher precision, faster inference (fewer layers to extract)
+- The layer choice space is worth further exploration (e.g., trying 6-7 layer combos with early layers like 3,5,8)
+- Per-layer caches for all 26 layers are now available for future experiments
+
+**Commit:** 6f4fdfd

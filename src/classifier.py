@@ -40,6 +40,7 @@ def select_features_position_aware_topn(
     train_pairs: list[TextPair],
     top_n: int = 50,
     min_count: int = 2,
+    verbose: bool = True,
 ) -> dict[ErrorType, dict[int, set[int]]]:
     """Select top-N features per type using position-aware selection.
 
@@ -104,7 +105,8 @@ def select_features_position_aware_topn(
             if n_selected >= top_n:
                 break
 
-        print(f"  {et.value}: {n_candidates} candidates → {n_selected} selected (top-{top_n})")
+        if verbose:
+            print(f"  {et.value}: {n_candidates} candidates → {n_selected} selected (top-{top_n})")
         per_type[et] = feats
 
     return per_type
@@ -385,6 +387,7 @@ def train_ovr(
     per_type_features: dict[ErrorType, dict[int, set[int]]],
     C: float = 1.0,
     class_weight: str | None = "balanced",
+    verbose: bool = True,
 ) -> OVRClassifier:
     """Train one binary LR per error type, each with its own feature set.
 
@@ -401,13 +404,15 @@ def train_ovr(
         len(pf["error"]["tokens"]) + len(pf["clean"]["tokens"])
         for pf in train_pair_features
     )
-    print(f"  OVR training on {n_tokens} tokens")
+    if verbose:
+        print(f"  OVR training on {n_tokens} tokens")
 
     models = {}
     for et in ErrorType:
         feat_index = per_type_index.get(et, [])
         if not feat_index:
-            print(f"  {et.value}: skipped (0 features selected)")
+            if verbose:
+                print(f"  {et.value}: skipped (0 features selected)")
             continue
 
         X = []
@@ -446,12 +451,14 @@ def train_ovr(
         y_arr = np.array(y)
         n_pos = y_arr.sum()
         if n_pos < 2:
-            print(f"  {et.value}: skipped (only {n_pos} positive tokens)")
+            if verbose:
+                print(f"  {et.value}: skipped (only {n_pos} positive tokens)")
             continue
 
         lr = LogisticRegression(C=C, class_weight=class_weight, max_iter=2000, random_state=42)
         lr.fit(X_arr, y_arr)
-        print(f"  {et.value}: {n_pos} positive tokens, {len(feat_index)} features, trained")
+        if verbose:
+            print(f"  {et.value}: {n_pos} positive tokens, {len(feat_index)} features, trained")
         models[et] = lr
 
     return OVRClassifier(

@@ -15,7 +15,7 @@ from src.classifier import (
 
 # --------------- Default parameters ---------------
 
-LAYERS = [7, 13, 17, 22]
+LAYERS = [3, 7, 13, 25]
 N_PAIRS = 6000
 MIN_WORDS = 8
 MAX_WORDS = 20
