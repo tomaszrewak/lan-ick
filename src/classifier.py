@@ -344,11 +344,12 @@ def calibrate_greedy_f05(
     calib_error_scores: list[dict[ErrorType, float]],
     calib_clean_scores: list[dict[ErrorType, float]],
     n_passes: int = 3,
+    max_threshold: float = 0.90,
 ) -> dict[ErrorType, float]:
     """Set per-type thresholds by coordinate descent on combined F0.5.
 
     A sentence fires if any type's max-score meets its threshold. We sweep
-    each type's threshold in [0.50, 1.00] holding others fixed, picking the
+    each type's threshold in [0.50, max_threshold] holding others fixed, picking the
     value that maximizes combined F0.5 on the calibration set. Repeats
     `n_passes` times. Stores thresholds on the classifier and returns them.
     """
@@ -357,11 +358,12 @@ def calibrate_greedy_f05(
     thresholds = {et: 0.50 for et in types}
     n_err = len(calib_error_scores)
     n_clean = len(calib_clean_scores)
+    max_t_int = int(max_threshold * 100)
 
     for _ in range(n_passes):
         for et in types:
             best_t, best_f05 = thresholds[et], -1.0
-            for t_int in range(50, 101):
+            for t_int in range(50, max_t_int + 1):
                 t = t_int / 100
                 trial = dict(thresholds)
                 trial[et] = t

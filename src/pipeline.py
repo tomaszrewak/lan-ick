@@ -16,7 +16,7 @@ from src.classifier import (
 # --------------- Default parameters ---------------
 
 LAYERS = [3, 7, 13, 25]
-N_PAIRS = 10000
+N_PAIRS = 6000
 MIN_WORDS = 8
 MAX_WORDS = 20
 DATA_SEED = 42
@@ -29,7 +29,7 @@ EXTRACT_VERSION = "v4"
 DATA_CACHE_KEY = f"{DATA_VERSION}_n{N_PAIRS}"
 EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w16k"
 TOP_N = 100
-CLASSIFIER_VERSION = "v1"  # bump when training logic changes
+CLASSIFIER_VERSION = "v3"  # bump when training logic changes
 CLASSIFIER_CACHE_KEY = f"{CLASSIFIER_VERSION}_{EXTRACT_CACHE_KEY}_top{TOP_N}_tr{TRAIN_RATIO}_cal{CALIB_RATIO}"
 
 
@@ -111,7 +111,7 @@ def build_classifier() -> tuple[OVRClassifier, list, list, list[int], list[int]]
         clf = train_ovr(fit_features, fit_pairs, LAYERS, per_type_feats)
 
         calib_err, calib_clean = _score_clean_error(calib_pairs, calib_features, clf)
-        calibrate_greedy_f05(clf, calib_err, calib_clean)
+        calibrate_greedy_f05(clf, calib_err, calib_clean, max_threshold=0.95)
         return clf
 
     classifier = cached("classifier", CLASSIFIER_CACHE_KEY, _train)
@@ -139,14 +139,17 @@ def check_text(text: str, classifier: OVRClassifier) -> dict:
     for w_idx, word in enumerate(words):
         tok_pos = last_tok.get(w_idx)
         errors = {}
+        predictions = {}
         if tok_pos is not None:
             for tp in token_preds:
                 if tp.position == tok_pos:
                     for et, prob in tp.error_probs.items():
+                        rounded = round(prob, 3)
+                        predictions[et.value] = rounded
                         threshold = classifier.thresholds.get(et, 1.0)
                         if prob >= threshold:
-                            errors[et.value] = round(prob, 3)
+                            errors[et.value] = rounded
                     break
-        word_results.append({"word": word, "errors": errors})
+        word_results.append({"word": word, "errors": errors, "predictions": predictions})
 
     return {"words": word_results}

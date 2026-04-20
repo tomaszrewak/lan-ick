@@ -1,8 +1,9 @@
-"""Experiment 27: Layer combination comparison.
+"""Experiment 29: Threshold cap impact.
 
-Test whether different layer selections meaningfully change performance.
-Uses per-layer caches (already extracted for all 26 layers) merged on the fly.
-Fast evaluation: 2-fold CV per combo, full 5-fold on baseline + best.
+Test how capping max_threshold at 0.90 (vs uncapped 1.00) affects combined
+metrics and per-type detection. The hypothesis is that types currently at 0.99
+(grammar, spelling, word_choice, word_order) are over-suppressed, and a lower
+cap will trade some precision for much better recall.
 """
 
 import random
@@ -13,26 +14,19 @@ from sklearn.exceptions import ConvergenceWarning
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 
 from src.cache import cached
-from src.data import generate_synthetic_pairs
+from src.data import ErrorType, generate_synthetic_pairs
 from src.classifier import (
     select_features_position_aware_topn, train_ovr, calibrate_greedy_f05, Metrics,
 )
 from src.pipeline import (
-    calibration_split, _score_clean_error,
-    N_PAIRS, MIN_WORDS, MAX_WORDS, DATA_SEED, DATA_VERSION,
-    EXTRACT_VERSION, TOP_N, CALIB_RATIO,
+    calibration_split, _score_clean_error, load_data,
+    TOP_N, CALIB_RATIO, LAYERS,
 )
 
 FOLD_SEED = 42
-DATA_CACHE_KEY = f"{DATA_VERSION}_n{N_PAIRS}"
 
-# Layer combos to test
-COMBOS = {
-    "baseline":     [7, 13, 17, 22],
-    "best_5":       [3, 7, 13, 17, 25],
-    "skip_17":      [3, 7, 13, 25],
-    "minimal_3":    [3, 7, 25],
-}
+# Threshold caps to sweep
+MAX_THRESHOLDS = [1.00, 0.95, 0.90, 0.85, 0.80]
 
 
 def _f_beta(p: float, r: float, beta: float) -> float:
@@ -65,139 +59,112 @@ def kfold_split(n: int, k: int, seed: int) -> list[tuple[list[int], list[int]]]:
     return folds
 
 
-def evaluate_layers(all_pairs, all_features, layers, folds, verbose=False):
-    """Run K-fold CV for a given layer subset. Returns (mean_f05, std_f05, mean_p, mean_r)."""
-    # Filter features to only requested layers
-    layer_set = set(layers)
-    filtered = []
-    for feat in all_features:
-        filtered.append({
-            "clean": {
-                "tokens": feat["clean"]["tokens"],
-                "features": {l: feat["clean"]["features"].get(l, {}) for l in layer_set},
-            },
-            "error": {
-                "tokens": feat["error"]["tokens"],
-                "features": {l: feat["error"]["features"].get(l, {}) for l in layer_set},
-            },
-        })
-
+def evaluate_cap(all_pairs, all_features, folds, max_threshold):
+    """Run 5-fold CV with a given max_threshold cap. Returns metrics + per-type stats."""
     f05_scores, p_scores, r_scores = [], [], []
+    per_type_detected = {}
+    per_type_total = {}
+    per_type_fp = {}
+    all_thresholds = []
 
     for fold_num, (train_idx, test_idx) in enumerate(folds):
         fit_idx, calib_idx = calibration_split(train_idx, CALIB_RATIO, FOLD_SEED * 100 + fold_num)
 
         fit_pairs = [all_pairs[i] for i in fit_idx]
-        fit_features = [filtered[i] for i in fit_idx]
+        fit_features = [all_features[i] for i in fit_idx]
         calib_pairs = [all_pairs[i] for i in calib_idx]
-        calib_features = [filtered[i] for i in calib_idx]
+        calib_features = [all_features[i] for i in calib_idx]
         test_pairs = [all_pairs[i] for i in test_idx]
-        test_features = [filtered[i] for i in test_idx]
+        test_features = [all_features[i] for i in test_idx]
 
         per_type_feats = select_features_position_aware_topn(
-            fit_features, layers, fit_pairs, top_n=TOP_N, verbose=False,
+            fit_features, LAYERS, fit_pairs, top_n=TOP_N, verbose=False,
         )
-        classifier = train_ovr(fit_features, fit_pairs, layers, per_type_feats, verbose=False)
+        classifier = train_ovr(fit_features, fit_pairs, LAYERS, per_type_feats, verbose=False)
         types = list(classifier.models.keys())
 
         calib_err, calib_clean = _score_clean_error(calib_pairs, calib_features, classifier)
         test_err, test_clean = _score_clean_error(test_pairs, test_features, classifier)
 
-        calibrate_greedy_f05(classifier, calib_err, calib_clean)
+        calibrate_greedy_f05(classifier, calib_err, calib_clean, max_threshold=max_threshold)
+        all_thresholds.append(dict(classifier.thresholds))
+
         cm = _combined_metrics(test_err, test_clean, classifier.thresholds, types)
         f05 = _f_beta(cm.precision, cm.recall, 0.5)
         f05_scores.append(f05)
         p_scores.append(cm.precision)
         r_scores.append(cm.recall)
 
-        if verbose:
-            print(f"    Fold {fold_num+1}: F0.5={f05:.1%}  P={cm.precision:.1%}  R={cm.recall:.1%}")
+        # Per-type detection
+        test_err_pairs = [all_pairs[i] for i in test_idx]
+        for et in types:
+            et_total = sum(1 for p in test_err_pairs if p.error_type == et)
+            et_detected = sum(
+                1 for es, p in zip(test_err, test_err_pairs)
+                if p.error_type == et and es.get(et, 0.0) >= classifier.thresholds[et]
+            )
+            et_fp = sum(1 for cs in test_clean if cs.get(et, 0.0) >= classifier.thresholds[et])
+            per_type_detected.setdefault(et, []).append(et_detected)
+            per_type_total.setdefault(et, []).append(et_total)
+            per_type_fp.setdefault(et, []).append(et_fp)
 
-    return np.mean(f05_scores), np.std(f05_scores), np.mean(p_scores), np.mean(r_scores)
+    # Aggregate
+    avg_thresh = {}
+    for et in all_thresholds[0]:
+        avg_thresh[et] = np.mean([t[et] for t in all_thresholds])
 
+    per_type_stats = {}
+    for et in per_type_detected:
+        total = sum(per_type_total[et])
+        detected = sum(per_type_detected[et])
+        fp = sum(per_type_fp[et])
+        per_type_stats[et] = {"det": detected / total if total else 0, "detected": detected, "total": total, "fp": fp}
 
-def load_merged_features(all_pairs, needed_layers):
-    """Load per-layer caches and merge into a single feature list."""
-    per_layer = {}
-    for layer in sorted(needed_layers):
-        key = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layer{layer}_w16k"
-        per_layer[layer] = cached(f"pair_features_L{layer}", key, lambda: None)
-        if per_layer[layer] is None:
-            raise RuntimeError(f"Cache missing for layer {layer} — run extraction first")
-
-    first_layer = sorted(needed_layers)[0]
-    all_features = []
-    for i in range(len(all_pairs)):
-        merged = {
-            "clean": {
-                "tokens": per_layer[first_layer][i]["clean"]["tokens"],
-                "features": {},
-            },
-            "error": {
-                "tokens": per_layer[first_layer][i]["error"]["tokens"],
-                "features": {},
-            },
-        }
-        for layer in needed_layers:
-            merged["clean"]["features"][layer] = per_layer[layer][i]["clean"]["features"].get(layer, {})
-            merged["error"]["features"][layer] = per_layer[layer][i]["error"]["features"].get(layer, {})
-        all_features.append(merged)
-
-    del per_layer
-    import gc; gc.collect()
-    return all_features
+    return {
+        "f05": np.mean(f05_scores), "f05_std": np.std(f05_scores),
+        "p": np.mean(p_scores), "r": np.mean(r_scores),
+        "thresholds": avg_thresh, "per_type": per_type_stats,
+    }
 
 
 def main():
-    all_pairs = cached(
-        "synthetic_pairs", DATA_CACHE_KEY,
-        lambda: generate_synthetic_pairs(N_PAIRS, MIN_WORDS, MAX_WORDS, DATA_SEED),
-    )
+    all_pairs, all_features = load_data()
+    print(f"Loaded {len(all_pairs)} pairs\n")
 
-    # Collect all unique layers needed
-    all_needed = set()
-    for layers in COMBOS.values():
-        all_needed.update(layers)
-    print(f"Loading {len(all_needed)} unique layers: {sorted(all_needed)}")
+    folds = kfold_split(len(all_pairs), 5, FOLD_SEED)
 
-    all_features = load_merged_features(all_pairs, all_needed)
-    print(f"Loaded {len(all_pairs)} pairs with {len(all_needed)} layers\n")
-
-    # Fast screening: 2-fold CV on each combo
-    folds2 = kfold_split(len(all_pairs), 2, FOLD_SEED)
-    print(f"{'='*60}")
-    print("PHASE 1: Quick screening (2-fold CV)")
-    print(f"{'='*60}")
+    print(f"{'='*70}")
+    print("Threshold cap sweep (5-fold CV)")
+    print(f"  Caps: {MAX_THRESHOLDS}")
+    print(f"{'='*70}\n")
 
     results = {}
-    for name, layers in COMBOS.items():
+    for cap in MAX_THRESHOLDS:
         t0 = time.time()
-        f05_m, f05_s, p_m, r_m = evaluate_layers(all_pairs, all_features, layers, folds2)
+        r = evaluate_cap(all_pairs, all_features, folds, cap)
         elapsed = time.time() - t0
-        results[name] = (f05_m, f05_s, p_m, r_m)
-        tag = " <<<" if name == "baseline" else ""
-        print(f"  {name:<15} {str(layers):<25} F0.5={f05_m:.1%}±{f05_s:.1%}  P={p_m:.1%}  R={r_m:.1%}  ({elapsed:.0f}s){tag}")
+        results[cap] = r
 
-    # Rank by F0.5
-    ranked = sorted(results.items(), key=lambda x: -x[1][0])
-    print(f"\n  Ranking:")
-    for i, (name, (f05, std, p, r)) in enumerate(ranked):
-        delta = f05 - results["baseline"][0]
-        print(f"    {i+1}. {name:<15} F0.5={f05:.1%}  Δ={delta:+.1%}")
+        tag = " <<< baseline" if cap == 1.00 else ""
+        print(f"  cap={cap:.2f}  F0.5={r['f05']:.1%}±{r['f05_std']:.1%}  P={r['p']:.1%}  R={r['r']:.1%}  ({elapsed:.0f}s){tag}")
 
-    # Full 5-fold on baseline + best non-baseline
-    best_name = ranked[0][0] if ranked[0][0] != "baseline" else (ranked[1][0] if len(ranked) > 1 else None)
+        # Per-type breakdown
+        for et in sorted(r['per_type'], key=lambda e: e.value):
+            s = r['per_type'][et]
+            print(f"    {et.value:<12} det={s['det']:.0%} ({s['detected']}/{s['total']})  FP={s['fp']}  thresh={r['thresholds'].get(et, 0):.2f}")
+        print()
 
-    folds5 = kfold_split(len(all_pairs), 5, FOLD_SEED)
-    print(f"\n{'='*60}")
-    print("PHASE 2: Full 5-fold CV validation")
-    print(f"{'='*60}")
+    # Summary
+    print(f"\n  Ranking by F0.5:")
+    baseline_f05 = results[1.00]['f05']
+    ranked = sorted(results.items(), key=lambda x: -x[1]['f05'])
+    for i, (cap, r) in enumerate(ranked):
+        delta = r['f05'] - baseline_f05
+        print(f"    {i+1}. cap={cap:.2f}  F0.5={r['f05']:.1%}±{r['f05_std']:.1%}  P={r['p']:.1%}  R={r['r']:.1%}  Δ={delta:+.1%}")
 
-    t0 = time.time()
-    base_f05, base_std, base_p, base_r = evaluate_layers(
-        all_pairs, all_features, COMBOS["baseline"], folds5, verbose=True,
-    )
-    print(f"  baseline {COMBOS['baseline']}: F0.5={base_f05:.1%}±{base_std:.1%}  P={base_p:.1%}  R={base_r:.1%}  ({time.time()-t0:.0f}s)")
+
+if __name__ == "__main__":
+    main()
 
     if best_name:
         t0 = time.time()

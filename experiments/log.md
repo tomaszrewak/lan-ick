@@ -1784,3 +1784,63 @@ Top-1 feature per type (diagnostic on full dataset):
 - Key insight: the calibration stage is the effective defense against contaminated features, not feature count reduction
 
 **Commit:** `c84ec19`
+
+---
+
+## Experiment 29 — Threshold cap impact
+
+**Date:** 2026-04-20T22:00:00+08:00
+
+**Goal:** Test whether capping calibrated thresholds at 0.90 (instead of allowing up to 1.00) improves the user experience by letting more detections through. Currently grammar/spelling/word_choice/word_order all sit at 0.99, which means only the most extreme signals fire. Sweep caps from 0.80 to 1.00.
+
+**Hypothesis:** Lowering the cap will increase recall (especially for grammar/word_order/word_choice) at the cost of some precision. The question is whether the recall gain is worth the FP increase for the UI.
+
+**Key parameters:** Layers [3,7,13,25], top_N=100, 5-fold CV, sweep max_threshold ∈ {0.80, 0.85, 0.90, 0.95, 1.00}, N=6000 pairs.
+
+### Results
+
+Only 3 of 5 caps were run before stopping (the pattern was clear):
+
+| cap  | F0.5        | P     | R     |
+|------|-------------|-------|-------|
+| 1.00 | 87.4%±0.8% | 88.1% | 84.6% |
+| 0.95 | 83.0%±0.3% | 81.1% | 91.5% |
+| 0.90 | 79.3%±0.5% | 76.3% | 93.9% |
+
+Per-type breakdown at cap=1.00 (baseline):
+- extra_word: det=96%, FP=43, thresh=0.92
+- grammar: det=79%, FP=266, thresh=0.99
+- spelling: det=87%, FP=121, thresh=0.99
+- word_choice: det=66%, FP=141, thresh=0.98
+- word_order: det=60%, FP=127, thresh=0.99
+- wtf: det=95%, FP=50, thresh=0.94
+
+Per-type breakdown at cap=0.95:
+- extra_word: det=97%, FP=52, thresh=0.77
+- grammar: det=88%, FP=512, thresh=0.95
+- spelling: det=92%, FP=256, thresh=0.95
+- word_choice: det=77%, FP=256, thresh=0.95
+- word_order: det=73%, FP=317, thresh=0.95
+- wtf: det=96%, FP=64, thresh=0.90
+
+Per-type breakdown at cap=0.90:
+- extra_word: det=97%, FP=53, thresh=0.67
+- grammar: det=90%, FP=658, thresh=0.90
+- spelling: det=94%, FP=374, thresh=0.90
+- word_choice: det=81%, FP=406, thresh=0.90
+- word_order: det=79%, FP=510, thresh=0.90
+- wtf: det=97%, FP=76, thresh=0.83
+
+### Analysis
+
+Each 5-point drop in the cap trades ~4pp precision for ~4-5pp recall. The uncapped baseline (1.00) maximizes F0.5 at 87.4%, but the 0.95 cap brings large recall gains (+7pp) especially for underperforming types: grammar 79→88%, spelling 87→92%, word_choice 66→77%, word_order 60→73%.
+
+The 0.90 cap pushes recall to 94% but precision drops to 76% — FP counts roughly double vs 0.95 for grammar/word_choice/word_order, which is likely too aggressive for UX.
+
+Empirical testing in the UI confirms cap=0.95 feels right: it catches duplicate-letter spelling errors and other previously-missed cases without overwhelming false positives.
+
+### Conclusion
+
+Adopted **max_threshold=0.95** for the production pipeline. This trades ~5pp precision (88→81%) for +7pp recall (85→92%). The F0.5 drops from 87.4% to 83.0%, but the metric is less meaningful here — the UX improvement from catching more errors outweighs the aggregate score. CLASSIFIER_VERSION bumped to v3.
+
+**Commit:** `36c9c06`

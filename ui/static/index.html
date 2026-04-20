@@ -4,7 +4,21 @@
   <meta charset="utf-8">
   <title>Lan-ick Error Detector</title>
   <style>
-    body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 0 20px; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      max-width: 820px;
+      margin: 48px auto;
+      padding: 0 24px;
+      background: #daeecf;
+      color: #2a2a2a;
+    }
+    h1 {
+      font-weight: 700;
+      font-size: 22px;
+      letter-spacing: -0.5px;
+      margin-bottom: 20px;
+    }
 
     /* Overlay container: backdrop + textarea stacked */
     .input-wrap {
@@ -15,53 +29,89 @@
     #backdrop {
       position: absolute;
       top: 0; left: 0; right: 0; bottom: 0;
-      padding: 8px;
-      font-size: 16px;
-      font-family: monospace;
-      line-height: 1.4;
-      color: transparent;       /* text invisible, only highlights show */
+      padding: 12px 14px;
+      font-size: 15px;
+      font-family: inherit;
+      line-height: 1.5;
+      color: transparent;
       background: #fff;
-      border: 1px solid #ccc;
-      border-radius: 4px;
+      border: 1.5px dashed #c0c6cf;
+      border-radius: 8px;
       overflow-y: auto;
       white-space: pre-wrap;
       word-wrap: break-word;
-      box-sizing: border-box;
     }
     #input {
       position: absolute;
       top: 0; left: 0;
       width: 100%; height: 100%;
-      padding: 8px;
-      font-size: 16px;
-      font-family: monospace;
-      line-height: 1.4;
-      color: #000;
-      background: transparent;  /* see-through to backdrop */
-      border: 1px solid #ccc;
-      border-radius: 4px;
+      padding: 12px 14px;
+      font-size: 15px;
+      font-family: inherit;
+      line-height: 1.5;
+      color: #2a2a2a;
+      background: transparent;
+      border: 1.5px dashed #c0c6cf;
+      border-radius: 8px;
       resize: none;
       overflow-y: auto;
       white-space: pre-wrap;
       word-wrap: break-word;
-      box-sizing: border-box;
+      outline: none;
+    }
+    #input:focus {
+      border-color: #8090a8;
+    }
+    #input::placeholder { color: #aab; }
+
+    /* Error highlights in backdrop — pill style */
+    .hw {
+      border-radius: 4px;
+      padding: 1px 3px;
+      margin: -1px -3px;   /* compensate so text doesn't shift */
+    }
+    .hw-spelling    { background: rgba(240, 80, 80, 0.22); }
+    .hw-word_choice { background: rgba(230, 140, 30, 0.22); }
+    .hw-grammar     { background: rgba(170, 80, 230, 0.22); }
+    .hw-word_order  { background: rgba(40, 130, 240, 0.22); }
+    .hw-extra_word  { background: rgba(220, 180, 30, 0.22); }
+    .hw-wtf         { background: rgba(140, 140, 150, 0.28); }
+
+    #status {
+      color: #999;
+      font-size: 12px;
+      margin: 10px 2px 0;
+      letter-spacing: 0.2px;
     }
 
-    /* Error highlights in backdrop */
-    .hw { border-radius: 2px; }
-    .hw-spelling    { background: rgba(255, 100, 100, 0.30); }
-    .hw-word_choice { background: rgba(255, 160, 50, 0.30); }
-    .hw-grammar     { background: rgba(200, 100, 255, 0.30); }
-    .hw-word_order  { background: rgba(50, 150, 255, 0.30); }
-    .hw-extra_word  { background: rgba(255, 200, 50, 0.30); }
-    .hw-wtf         { background: rgba(180, 180, 180, 0.40); }
-
-    #status { color: #888; margin: 8px 0; }
-    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
-    th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
-    th { background: #f5f5f5; }
-    .error { background: #ffe0e0; }
-    .clean { background: #e8f5e9; }
+    /* Grid / table */
+    table {
+      width: 100%;
+      margin-top: 14px;
+      border-collapse: separate;
+      border-spacing: 0;
+      border: 1px solid #e0e3e8;
+      border-radius: 8px;
+      overflow: hidden;
+      font-size: 13px;
+    }
+    th, td {
+      padding: 4px 8px;
+      text-align: left;
+      border-bottom: 1px solid #eceef1;
+    }
+    th {
+      background: #f0f1f4;
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #666;
+    }
+    tr:last-child td { border-bottom: none; }
+    .error { background: #ffe9e9; }
+    .clean { background: #fff; }
+    .error td:nth-child(2) { font-weight: 600; }
   </style>
 </head>
 <body>
@@ -220,8 +270,14 @@
         tr.className = hasError ? 'error' : 'clean';
         tr.innerHTML = `<td>${i + 1}</td><td>${esc(w.word)}</td>` +
           ERROR_TYPES.map(et => {
-            const p = w.errors[et];
-            return `<td>${p !== undefined ? p.toFixed(3) : ''}</td>`;
+            const triggered = w.errors[et];
+            const pred = w.predictions && w.predictions[et];
+            if (triggered !== undefined) {
+              return `<td>${triggered.toFixed(3)}</td>`;
+            } else if (pred !== undefined) {
+              return `<td style="color:rgba(42,42,42,0.1)">${pred.toFixed(3)}</td>`;
+            }
+            return `<td></td>`;
           }).join('');
         tbody.appendChild(tr);
       });
