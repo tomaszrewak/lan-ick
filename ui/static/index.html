@@ -5,7 +5,57 @@
   <title>Lan-ick Error Detector</title>
   <style>
     body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 0 20px; }
-    textarea { width: 100%; height: 120px; font-size: 16px; font-family: inherit; }
+
+    /* Overlay container: backdrop + textarea stacked */
+    .input-wrap {
+      position: relative;
+      width: 100%;
+      height: 150px;
+    }
+    #backdrop {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      padding: 8px;
+      font-size: 16px;
+      font-family: monospace;
+      line-height: 1.4;
+      color: transparent;       /* text invisible, only highlights show */
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      box-sizing: border-box;
+    }
+    #input {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      padding: 8px;
+      font-size: 16px;
+      font-family: monospace;
+      line-height: 1.4;
+      color: #000;
+      background: transparent;  /* see-through to backdrop */
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      resize: none;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      box-sizing: border-box;
+    }
+
+    /* Error highlights in backdrop */
+    .hw { border-radius: 2px; }
+    .hw-spelling    { background: rgba(255, 100, 100, 0.30); }
+    .hw-word_choice { background: rgba(255, 160, 50, 0.30); }
+    .hw-grammar     { background: rgba(200, 100, 255, 0.30); }
+    .hw-word_order  { background: rgba(50, 150, 255, 0.30); }
+    .hw-extra_word  { background: rgba(255, 200, 50, 0.30); }
+    .hw-wtf         { background: rgba(180, 180, 180, 0.40); }
+
     #status { color: #888; margin: 8px 0; }
     table { border-collapse: collapse; width: 100%; margin-top: 16px; }
     th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
@@ -16,7 +66,10 @@
 </head>
 <body>
   <h1>Lan-ick Error Detector</h1>
-  <textarea id="input" placeholder="Type or paste text here..."></textarea>
+  <div class="input-wrap">
+    <div id="backdrop"></div>
+    <textarea id="input" placeholder="Type or paste text here..."></textarea>
+  </div>
   <div id="status">Ready</div>
   <table id="results" hidden>
     <thead>
@@ -36,31 +89,49 @@
   <script>
     const ERROR_TYPES = ['spelling', 'word_choice', 'grammar', 'word_order', 'extra_word', 'wtf'];
     const input = document.getElementById('input');
+    const backdrop = document.getElementById('backdrop');
     const status = document.getElementById('status');
     const results = document.getElementById('results');
     const tbody = document.getElementById('results-body');
 
-    let timer = null;
-    let inflight = null;
-
-    input.addEventListener('input', () => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(sendCheck, 500);
+    // --------------- Sync scroll between textarea and backdrop ---------------
+    input.addEventListener('scroll', () => {
+      backdrop.scrollTop = input.scrollTop;
+      backdrop.scrollLeft = input.scrollLeft;
     });
 
-    async function sendCheck() {
+    // --------------- State ---------------
+    let inflight = null;     // AbortController of current request, or null
+    let pending = false;     // true if a re-check is scheduled after current finishes
+
+    // Last completed classification result
+    let lastResult = null;   // { text: string, words: [{word, errors}, ...] }
+
+    // --------------- Debounce: fire-or-schedule on every input ---------------
+    input.addEventListener('input', () => {
+      updateHighlights();    // re-apply highlights to current text immediately
+      if (inflight) {
+        pending = true;      // already running — schedule one more
+      } else {
+        fireCheck();         // nothing running — fire now
+      }
+    });
+
+    async function fireCheck() {
       const text = input.value.trim();
       if (!text) {
+        lastResult = null;
         results.hidden = true;
         status.textContent = 'Ready';
+        updateHighlights();
         return;
       }
 
-      if (inflight) inflight.abort();
       const controller = new AbortController();
       inflight = controller;
+      pending = false;
+      status.textContent = 'Checking\u2026';
 
-      status.textContent = 'Checking...';
       try {
         const resp = await fetch('/api/check', {
           method: 'POST',
@@ -73,17 +144,73 @@
           status.textContent = 'Error: ' + data.error;
           return;
         }
+        lastResult = { text, words: data.words };
         renderResults(data.words);
+        updateHighlights();
         status.textContent = `Checked ${data.words.length} words`;
       } catch (e) {
         if (e.name !== 'AbortError') {
           status.textContent = 'Error: ' + e.message;
         }
       } finally {
-        if (inflight === controller) inflight = null;
+        inflight = null;
+        if (pending) {
+          pending = false;
+          fireCheck();       // re-check with whatever text is now in the box
+        }
       }
     }
 
+    // --------------- Highlight overlay ---------------
+    function updateHighlights() {
+      const currentText = input.value;
+      if (!currentText) {
+        backdrop.innerHTML = '';
+        return;
+      }
+
+      if (!lastResult) {
+        // No classification yet — show plain (escaped) text so whitespace matches
+        backdrop.innerHTML = esc(currentText);
+        return;
+      }
+
+      // Split both current text and classified text into words (by whitespace)
+      const currentWords = currentText.split(/(\s+)/);   // keeps separators
+      const classifiedWords = lastResult.text.split(/\s+/);
+
+      // Build a map: classified word index → error type (first / highest)
+      const errorMap = {};  // { wordIdx: topErrorType }
+      lastResult.words.forEach((w, i) => {
+        const types = Object.keys(w.errors);
+        if (types.length > 0) {
+          errorMap[i] = types[0]; // first listed type
+        }
+      });
+
+      // Walk current tokens; non-space tokens get a word index
+      let wordIdx = 0;
+      let html = '';
+      for (const token of currentWords) {
+        if (/^\s+$/.test(token)) {
+          // whitespace — preserve exactly
+          html += esc(token);
+        } else {
+          // real word — check if it matches same-index classified word
+          const errorType = errorMap[wordIdx];
+          const classWord = classifiedWords[wordIdx];
+          if (errorType && token === classWord) {
+            html += `<mark class="hw hw-${errorType}">${esc(token)}</mark>`;
+          } else {
+            html += esc(token);
+          }
+          wordIdx++;
+        }
+      }
+      backdrop.innerHTML = html;
+    }
+
+    // --------------- Results table ---------------
     function renderResults(words) {
       tbody.innerHTML = '';
       results.hidden = false;

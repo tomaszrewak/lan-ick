@@ -100,10 +100,24 @@ def _substitute_vowel(word: str, rng: random.Random) -> str:
 
 
 def _repeat_letter(word: str, rng: random.Random) -> str:
-    """Repeat a letter 1-2 extra times (e.g., 'probably' → 'proobably')."""
-    if len(word) < 3:
+    """Repeat a letter 1-2 extra times (e.g., 'probably' → 'proobably').
+
+    Weighted toward earlier positions so corruptions land in initial subword
+    tokens more often (where the model's last-token scoring has less visibility).
+    """
+    if len(word) < 2:
         return word
-    pos = rng.randint(0, len(word) - 1)
+    # Linearly decreasing weights: position 0 gets highest weight
+    weights = [len(word) - i for i in range(len(word))]
+    total = sum(weights)
+    r = rng.random() * total
+    cumulative = 0
+    pos = 0
+    for i, w in enumerate(weights):
+        cumulative += w
+        if cumulative >= r:
+            pos = i
+            break
     n_repeats = rng.randint(1, 2)
     return word[:pos] + word[pos] * (1 + n_repeats) + word[pos + 1:]
 

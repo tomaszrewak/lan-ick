@@ -16,7 +16,7 @@ from src.classifier import (
 # --------------- Default parameters ---------------
 
 LAYERS = [3, 7, 13, 25]
-N_PAIRS = 6000
+N_PAIRS = 10000
 MIN_WORDS = 8
 MAX_WORDS = 20
 DATA_SEED = 42
@@ -29,6 +29,8 @@ EXTRACT_VERSION = "v4"
 DATA_CACHE_KEY = f"{DATA_VERSION}_n{N_PAIRS}"
 EXTRACT_CACHE_KEY = f"{EXTRACT_VERSION}_{DATA_VERSION}_n{N_PAIRS}_layers={'_'.join(map(str, LAYERS))}_w16k"
 TOP_N = 100
+CLASSIFIER_VERSION = "v1"  # bump when training logic changes
+CLASSIFIER_CACHE_KEY = f"{CLASSIFIER_VERSION}_{EXTRACT_CACHE_KEY}_top{TOP_N}_tr{TRAIN_RATIO}_cal{CALIB_RATIO}"
 
 
 # --------------- Load data ---------------
@@ -88,25 +90,31 @@ def build_classifier() -> tuple[OVRClassifier, list, list, list[int], list[int]]
     descent on the calibration split (see `calibrate_greedy_f05`). The test
     split is untouched.
 
+    The trained classifier is cached to disk so server restarts don't retrain.
+
     Returns (classifier, all_pairs, all_features, train_idx, test_idx).
     """
     all_pairs, all_features = load_data()
     train_idx, test_idx = split_train_test(all_pairs, TRAIN_RATIO, SPLIT_SEED)
-    fit_idx, calib_idx = calibration_split(train_idx, CALIB_RATIO, CALIB_SEED)
 
-    fit_pairs = [all_pairs[i] for i in fit_idx]
-    fit_features = [all_features[i] for i in fit_idx]
-    calib_pairs = [all_pairs[i] for i in calib_idx]
-    calib_features = [all_features[i] for i in calib_idx]
+    def _train():
+        fit_idx, calib_idx = calibration_split(train_idx, CALIB_RATIO, CALIB_SEED)
 
-    per_type_feats = select_features_position_aware_topn(
-        fit_features, LAYERS, fit_pairs, top_n=TOP_N,
-    )
-    classifier = train_ovr(fit_features, fit_pairs, LAYERS, per_type_feats)
+        fit_pairs = [all_pairs[i] for i in fit_idx]
+        fit_features = [all_features[i] for i in fit_idx]
+        calib_pairs = [all_pairs[i] for i in calib_idx]
+        calib_features = [all_features[i] for i in calib_idx]
 
-    calib_err, calib_clean = _score_clean_error(calib_pairs, calib_features, classifier)
-    calibrate_greedy_f05(classifier, calib_err, calib_clean)
+        per_type_feats = select_features_position_aware_topn(
+            fit_features, LAYERS, fit_pairs, top_n=TOP_N,
+        )
+        clf = train_ovr(fit_features, fit_pairs, LAYERS, per_type_feats)
 
+        calib_err, calib_clean = _score_clean_error(calib_pairs, calib_features, clf)
+        calibrate_greedy_f05(clf, calib_err, calib_clean)
+        return clf
+
+    classifier = cached("classifier", CLASSIFIER_CACHE_KEY, _train)
     return classifier, all_pairs, all_features, train_idx, test_idx
 
 
