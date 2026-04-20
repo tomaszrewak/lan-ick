@@ -118,7 +118,7 @@
   <h1>Lan-ick Error Detector</h1>
   <div class="input-wrap">
     <div id="backdrop"></div>
-    <textarea id="input" placeholder="Type or paste text here..."></textarea>
+    <textarea id="input" placeholder="Type or paste text here...">This ekample sentence are containing few missppelled or otherwise words erroneous that might might require correction buy someone lse then myself - possibly dasdwdeadsd.</textarea>
   </div>
   <div id="status">Ready</div>
   <table id="results" hidden>
@@ -288,6 +288,9 @@
       d.textContent = s;
       return d.innerHTML;
     }
+
+    // Fire initial check if textarea has content on load
+    if (input.value.trim()) fireCheck();
   </script>
 </body>
 </html>
