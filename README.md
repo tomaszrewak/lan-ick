@@ -43,7 +43,7 @@ tokenization:            (Some) ( short) ( sent)(ten)(ce)       sentence split i
 embeddings:                e1       e2      e3    e4   e5       e_x = dense vector for each token with 1152 features
                            ↓        ↓       ↓     ↓    ↓
 LLM hidden layers:     ╭⟶ h1       h2      h3    h4   h5       h_x = dense vector with 1152 features, updated across 26 layers
-                       │   ↓¯¯¯¯¯¯↘ ↓¯¯¯¯¯↘ ↓¯¯¯↘ ↓¯↘ ↓
+                       │   ↓¯¯¯¯¯¯↘¯↓¯¯¯¯¯↘¯↓¯¯¯↘¯↓¯↘ ↓
                        ╰── h1'      h2'     h3'   h4'  h5'
                            ⇓        ⇓       ⇓     ⇓    ⇓
 layer selection:           h1"      h2"     h3"   h4"  h5"      collect all activations of 4 out of 26 layers: 3, 7, 13, 25
